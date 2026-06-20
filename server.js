@@ -20,7 +20,7 @@ async function startServer() {
     await connectToDatabase();
 
     app.listen(PORT, HOST, () => {
-      console.log(`[Backend] Monitask backend listening on ${HOST}:${PORT}`);
+      console.log(`LieTracker Backend listening on ${HOST}:${PORT}`);
     });
   } catch (error) {
     console.error('[Backend] Fatal startup error:', error);
