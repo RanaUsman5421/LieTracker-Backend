@@ -35,6 +35,7 @@ app.use('/api/dashboard', dashboardRouter);
 app.use('/api/dashboard-auth', dashboardAuthRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/user-period-summary', userPeriodSummaryRouter);
+app.use('/updates', updatesRouter);
 
 app.get('/', (req, res) => {
   res.json({
