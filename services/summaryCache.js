@@ -13,7 +13,7 @@ async function withCachedSummary(cacheKey, resolver, ttlMs = SUMMARY_CACHE_TTL_M
   if (cached && cached.expiresAt > now) {
     return cached.value;
   }
-
+  
   const value = await resolver();
   summaryCache.set(cacheKey, {
     value,

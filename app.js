@@ -13,7 +13,6 @@ const app = express();
 const allowedOrigins = CORS_ALLOWED_ORIGINS
   ? CORS_ALLOWED_ORIGINS.split(',').map((origin) => origin.trim()).filter(Boolean)
   : [];
-
 app.set('trust proxy', 1);
 app.use(cors({
   origin(origin, callback) {
