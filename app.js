@@ -8,6 +8,7 @@ const authRouter = require('./routes/auth');
 const dashboardRouter = require('./routes/dashboard');
 const dashboardAuthRouter = require('./routes/dashboardAuth');
 const userPeriodSummaryRouter = require('./routes/userPeriodSummary');
+const updatesRouter = require('./routes/updates');
 
 const app = express();
 const allowedOrigins = CORS_ALLOWED_ORIGINS
