@@ -4,7 +4,10 @@ const path = require('path');
 
 const router = express.Router();
 const updatesDir = path.join(__dirname, '..', 'updates');
-const updaterConfigPath = path.join(updatesDir, 'updater.json');
+const updaterConfigPaths = [
+  path.join(updatesDir, 'updater.json'),
+  path.join(updatesDir, 'latest.json'),
+];
 const supportedTargets = new Set(['windows', 'darwin', 'linux']);
 const supportedArchitectures = new Set(['x86_64', 'aarch64', 'i686', 'armv7']);
 const artifactNamePattern = /^[a-zA-Z0-9._ -]+\.(exe|msi|appimage|dmg|zip|tar\.gz)$/i;
@@ -54,26 +57,34 @@ function buildPublicFileUrl(req, fileName) {
 }
 
 async function readUpdaterConfig() {
-  let rawConfig;
+  let lastMissingError = null;
 
-  try {
-    rawConfig = await fs.readFile(updaterConfigPath, 'utf8');
-  } catch (error) {
-    if (error.code === 'ENOENT') {
-      const missingError = new Error('Updater configuration file is missing');
-      missingError.statusCode = 503;
-      throw missingError;
+  for (const configPath of updaterConfigPaths) {
+    let rawConfig;
+
+    try {
+      rawConfig = await fs.readFile(configPath, 'utf8');
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        lastMissingError = error;
+        continue;
+      }
+      throw error;
     }
-    throw error;
+
+    try {
+      return JSON.parse(rawConfig);
+    } catch (error) {
+      const invalidError = new Error(`${path.basename(configPath)} is not valid JSON`);
+      invalidError.statusCode = 500;
+      throw invalidError;
+    }
   }
 
-  try {
-    return JSON.parse(rawConfig);
-  } catch (error) {
-    const invalidError = new Error('Updater configuration file is not valid JSON');
-    invalidError.statusCode = 500;
-    throw invalidError;
-  }
+  const missingError = new Error('Updater configuration file is missing');
+  missingError.statusCode = 503;
+  missingError.cause = lastMissingError;
+  throw missingError;
 }
 
 function validateUpdaterConfig(config) {
