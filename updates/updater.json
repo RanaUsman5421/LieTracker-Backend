@@ -1,7 +1,7 @@
 {
-  "version": "0.1.0",
-  "notes": "Initial signed updater release",
+  "version": "0.2.0",
+  "notes": "Added Updater",
   "pub_date": "2026-06-27T10:00:00Z",
-  "installer": "lietracker_0.1.0_x64-setup.exe",
-  "signatureFile": "lietracker_0.1.0_x64-setup.exe.sig"
+  "installer": "lietracker_0.2.0_x64-setup.exe",
+  "signatureFile": "lietracker_0.2.0_x64-setup.exe.sig"
 }
