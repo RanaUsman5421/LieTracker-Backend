@@ -1,6 +1,6 @@
 {
   "version": "0.3.0",
-  "notes": "Initial signed updater release",
+  "notes": "3rd Version of the app",
   "pub_date": "2026-06-27T10:00:00Z",
   "installer": "Lietracker_0.3.0_x64-setup.exe",
   "signatureFile": "Lietracker_0.3.0_x64-setup.exe.sig"
