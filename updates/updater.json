@@ -2,6 +2,6 @@
   "version": "0.3.0",
   "notes": "Added Updater",
   "pub_date": "2026-06-27T10:00:00Z",
-  "installer": "Lietracker_0.3.0_x64-setup.exe",
-  "signatureFile": "Lietracker_0.3.0_x64-setup.exe.sig"
+  "installer": "LieTracker_0.3.0_x64-setup.exe",
+  "signatureFile": "LieTracker_0.3.0_x64-setup.exe.sig"
 }
