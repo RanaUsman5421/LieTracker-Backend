@@ -8,6 +8,7 @@ async function startServer() {
     const { getCloudinaryConfigStatus } = require('./config/cloudinary');
     const { PORT, HOST } = require('./config/constants');
     const { connectToDatabase } = require('./services/database');
+    const { startScreenshotCleanupJob } = require('./jobs/screenshotCleanup');
 
     const cloudinaryConfigStatus = getCloudinaryConfigStatus();
 
@@ -18,6 +19,7 @@ async function startServer() {
     }
 
     await connectToDatabase();
+    startScreenshotCleanupJob();
 
     app.listen(PORT, HOST, () => {
       console.log(`LieTracker Backend listening on ${HOST}:${PORT}`);
