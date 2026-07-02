@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const cloudinary = require('../config/cloudinary');
 const Screenshot = require('../models/Screenshot');
 const User = require('../models/User');
@@ -37,6 +38,16 @@ function uploadToCloudinary({ buffer, userId }) {
     );
 
     stream.end(buffer);
+  });
+}
+
+async function deleteFromCloudinary(publicId) {
+  if (!publicId) {
+    return;
+  }
+
+  await cloudinary.uploader.destroy(publicId, {
+    resource_type: 'image',
   });
 }
 
@@ -156,6 +167,45 @@ router.get('/:userId', requireDashboardAuthenticatedAdmin, async (req, res) => {
   } catch (error) {
     console.error('[Backend] Get screenshots error:', error);
     res.status(500).json({ success: false, message: 'Unable to fetch screenshots' });
+  }
+});
+
+router.delete('/:id', requireDashboardAuthenticatedAdmin, async (req, res) => {
+  try {
+    const screenshotId = String(req.params.id || '').trim();
+
+    if (!mongoose.isValidObjectId(screenshotId)) {
+      return res.status(400).json({ success: false, message: 'A valid screenshot id is required' });
+    }
+
+    const screenshot = await Screenshot.findById(screenshotId);
+    if (!screenshot) {
+      return res.status(404).json({ success: false, message: 'Screenshot not found' });
+    }
+
+    await deleteFromCloudinary(screenshot.publicId);
+    await Screenshot.findByIdAndDelete(screenshotId);
+
+    const latestScreenshot = await Screenshot.findOne({ userId: screenshot.userId })
+      .sort({ timestamp: -1 })
+      .select('timestamp')
+      .lean();
+
+    await User.findByIdAndUpdate(screenshot.userId, {
+      lastScreenshotAt: latestScreenshot?.timestamp || null,
+    });
+    clearSummaryCache();
+
+    res.json({
+      success: true,
+      message: 'Screenshot deleted successfully',
+      data: {
+        id: screenshot._id,
+      },
+    });
+  } catch (error) {
+    console.error('[Backend] Delete screenshot error:', error);
+    res.status(500).json({ success: false, message: 'Unable to delete screenshot' });
   }
 });
 
