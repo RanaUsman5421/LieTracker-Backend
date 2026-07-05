@@ -9,6 +9,7 @@ router.get('/:identifier', requireDashboardAuthenticatedAdmin, async (req, res) 
     const data = await getUserPeriodSummaryWithOptions(req.params.identifier, {
       startDate: req.query.startDate,
       endDate: req.query.endDate,
+      adminId: req.adminId,
     });
 
     if (!data.user) {

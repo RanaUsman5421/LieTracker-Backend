@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { ensureDefaultAdmin } = require('../services/adminBootstrap');
 const { createRateLimiter } = require('../middleware/rateLimit');
 const { requireAuthenticatedUser } = require('../middleware/requireAuth');
 const { createAuthToken } = require('../utils/auth');
@@ -26,12 +27,23 @@ router.post('/signup', authRateLimit, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
     }
 
-    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
+    const defaultAdmin = await ensureDefaultAdmin();
+    const normalizedUsername = String(username).trim();
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const existingUser = await User.findOne({
+      adminId: defaultAdmin._id,
+      $or: [{ email: normalizedEmail }, { username: normalizedUsername }],
+    });
     if (existingUser) {
       return res.status(400).json({ success: false, message: 'User with this email or username already exists' });
     }
 
-    const user = new User({ username, email, password });
+    const user = new User({
+      adminId: defaultAdmin._id,
+      username: normalizedUsername,
+      email: normalizedEmail,
+      password,
+    });
     await user.save();
 
     const sessionId = crypto.randomUUID();
@@ -63,14 +75,17 @@ router.post('/login', authRateLimit, async (req, res) => {
       userLookup.push({ email: emailLookup });
     }
 
-    const user = await User.findOne({ $or: userLookup });
+    const users = await User.find({ $or: userLookup }).limit(10);
+    let user = null;
 
-    if (!user) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    for (const candidate of users) {
+      if (await candidate.comparePassword(password)) {
+        user = candidate;
+        break;
+      }
     }
 
-    const isValid = await user.comparePassword(password);
-    if (!isValid) {
+    if (!user) {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
@@ -96,7 +111,7 @@ router.get('/verify', async (req, res) => {
     }
 
     const decoded = jwt.verify(token, JWT_SECRET);
-    const user = await User.findById(decoded.userId).select('_id username email activeSessionId').lean();
+    const user = await User.findById(decoded.userId).select('_id adminId username email activeSessionId').lean();
     const tokenSessionId = String(decoded?.sessionId || '').trim();
     const activeSessionId = String(user?.activeSessionId || '').trim();
 

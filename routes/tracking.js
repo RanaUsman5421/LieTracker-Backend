@@ -145,6 +145,7 @@ router.post('/', trackingWriteRateLimit, requireAuthenticatedUser, async (req, r
     }))
       .select('_id email')
       .lean();
+    const resolvedAdminId = resolvedUser?.adminId || authUser?.adminId || null;
 
     const mappedEntries = entries.map((entry) => {
       const duration = Math.max(0, Number(entry.duration) || 0);
@@ -171,6 +172,7 @@ router.post('/', trackingWriteRateLimit, requireAuthenticatedUser, async (req, r
         : Math.max(0, Number(entry.productivityScore) || 0);
 
       return {
+        adminId: resolvedAdminId,
         userId: resolvedUser?._id || null,
         deviceId: String(entry.deviceId || 'unknown-device').trim() || 'unknown-device',
         app: entry.app || 'Unknown',
@@ -212,12 +214,12 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
       maxLimit: 1000,
     });
     const [entries, total] = await Promise.all([
-      TrackingEntry.find({})
+      TrackingEntry.find({ adminId: req.adminId })
         .sort({ timestamp: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
-      TrackingEntry.countDocuments({}),
+      TrackingEntry.countDocuments({ adminId: req.adminId }),
     ]);
     res.json({
       success: true,
@@ -242,7 +244,7 @@ router.get('/user/:identifier', requireDashboardAuthenticatedAdmin, async (req, 
       limit: 250,
       maxLimit: 1000,
     });
-    const userQuery = buildUserScopedQuery(req.params.identifier);
+    const userQuery = buildUserScopedQuery(req.params.identifier, req.adminId);
     const [entries, total] = await Promise.all([
       TrackingEntry.find(userQuery)
         .sort({ timestamp: -1 })
@@ -271,10 +273,11 @@ router.get('/user/:identifier/presence-sessions', requireDashboardAuthenticatedA
   try {
     const date = req.query.date ? String(req.query.date) : getDayKey(new Date());
     const { start, end } = getDateBoundsFromQuery(date);
-    const userQuery = buildUserScopedQuery(req.params.identifier);
+    const userQuery = buildUserScopedQuery(req.params.identifier, req.adminId);
     const matchedUser = await User.findOne(buildUserLookupQuery({
       userId: req.params.identifier,
       userEmail: req.params.identifier,
+      adminId: req.adminId,
     }))
       .select('_id email')
       .lean();
@@ -289,6 +292,7 @@ router.get('/user/:identifier/presence-sessions', requireDashboardAuthenticatedA
         .lean(),
       matchedUser?._id
         ? Screenshot.find({
+          adminId: req.adminId,
           userId: String(matchedUser._id),
           timestamp: { $gte: start, $lt: end },
         })
@@ -354,6 +358,7 @@ router.post('/manual', requireDashboardAuthenticatedAdmin, async (req, res) => {
     const user = await User.findOne(buildUserLookupQuery({
       userId,
       userEmail: normalizedUserEmail,
+      adminId: req.adminId,
     })).lean();
 
     if (!user) {
@@ -361,6 +366,7 @@ router.post('/manual', requireDashboardAuthenticatedAdmin, async (req, res) => {
     }
 
     const manualEntry = await TrackingEntry.create({
+      adminId: req.adminId,
       userId: user._id,
       deviceId: 'manual-entry',
       app: normalizedProject,
@@ -409,9 +415,9 @@ router.post('/manual', requireDashboardAuthenticatedAdmin, async (req, res) => {
 router.get('/user/:identifier/summary', requireDashboardAuthenticatedAdmin, async (req, res) => {
   try {
     const days = clampNumber(req.query.days, { minimum: 7, maximum: 90, fallback: 31 });
-    const cacheKey = `user-summary:${req.params.identifier}:${days}`;
+    const cacheKey = `user-summary:${req.adminId}:${req.params.identifier}:${days}`;
     const summary = await withCachedSummary(cacheKey, async () => {
-      const userQuery = buildUserScopedQuery(req.params.identifier);
+      const userQuery = buildUserScopedQuery(req.params.identifier, req.adminId);
       const range = getDateRangeForRecentDays(days);
       const resolvedActiveDuration = buildResolvedActiveDurationExpression();
       const resolvedInactiveDuration = buildResolvedInactiveDurationExpression();
@@ -420,12 +426,14 @@ router.get('/user/:identifier/summary', requireDashboardAuthenticatedAdmin, asyn
         User.findOne(buildUserLookupQuery({
           userId: req.params.identifier,
           userEmail: req.params.identifier,
+          adminId: req.adminId,
         }))
           .select('_id email username createdAt lastSeenAt lastScreenshotAt')
           .lean(),
         TrackingEntry.aggregate([
           {
             $match: {
+              adminId: req.adminId,
               ...userQuery,
               timestamp: {
                 $gte: range.rangeStart,
@@ -476,6 +484,7 @@ router.get('/user/:identifier/summary', requireDashboardAuthenticatedAdmin, asyn
         ? await Screenshot.aggregate([
           {
             $match: {
+              adminId: req.adminId,
               userId: String(matchedUser._id),
               timestamp: {
                 $gte: range.rangeStart,
@@ -543,9 +552,9 @@ router.get('/user/:identifier/activity', requireDashboardAuthenticatedAdmin, asy
     const limit = clampNumber(req.query.limit, { minimum: 1, maximum: 25, fallback: 7 });
     const date = req.query.date ? String(req.query.date) : getDayKey(new Date());
     const { start, end } = getDateBoundsFromQuery(date);
-    const cacheKey = `user-activity:${req.params.identifier}:${date}:${limit}`;
+    const cacheKey = `user-activity:${req.adminId}:${req.params.identifier}:${date}:${limit}`;
     const activity = await withCachedSummary(cacheKey, async () => {
-      const userQuery = buildUserScopedQuery(req.params.identifier);
+      const userQuery = buildUserScopedQuery(req.params.identifier, req.adminId);
       const matchStage = {
         ...userQuery,
         timestamp: { $gte: start, $lt: end },
@@ -612,11 +621,16 @@ router.get('/user/:identifier/activity', requireDashboardAuthenticatedAdmin, asy
 
 router.get('/summary', requireDashboardAuthenticatedAdmin, async (req, res) => {
   try {
-    const summary = await withCachedSummary('tracking-summary', async () => {
+    const summary = await withCachedSummary(`tracking-summary:${req.adminId}`, async () => {
       const resolvedActiveDuration = buildResolvedActiveDurationExpression();
       const resolvedInactiveDuration = buildResolvedInactiveDurationExpression();
 
       const userSummary = await TrackingEntry.aggregate([
+        {
+          $match: {
+            adminId: req.adminId,
+          },
+        },
         {
           $group: {
             _id: '$userEmail',
@@ -648,6 +662,11 @@ router.get('/summary', requireDashboardAuthenticatedAdmin, async (req, res) => {
       ]);
 
       const appSummary = await TrackingEntry.aggregate([
+        {
+          $match: {
+            adminId: req.adminId,
+          },
+        },
         {
           $group: {
             _id: '$app',

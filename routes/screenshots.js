@@ -96,6 +96,7 @@ async function createScreenshot(req, res, next) {
     });
 
     const screenshot = await Screenshot.create({
+      adminId: req.authUser.adminId,
       userId,
       deviceId,
       imageUrl: uploaded.secure_url,
@@ -147,7 +148,7 @@ router.get('/:userId', requireDashboardAuthenticatedAdmin, async (req, res) => {
     const { userId } = req.params;
     const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 200);
     const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
-    const query = { userId: String(userId).trim() };
+    const query = { adminId: req.adminId, userId: String(userId).trim() };
 
     if (date) {
       const { start, end } = getDateBoundsFromQuery(date);
@@ -178,7 +179,7 @@ router.delete('/:id', requireDashboardAuthenticatedAdmin, async (req, res) => {
       return res.status(400).json({ success: false, message: 'A valid screenshot id is required' });
     }
 
-    const screenshot = await Screenshot.findById(screenshotId);
+    const screenshot = await Screenshot.findOne({ _id: screenshotId, adminId: req.adminId });
     if (!screenshot) {
       return res.status(404).json({ success: false, message: 'Screenshot not found' });
     }
@@ -186,7 +187,7 @@ router.delete('/:id', requireDashboardAuthenticatedAdmin, async (req, res) => {
     await deleteFromCloudinary(screenshot.publicId);
     await Screenshot.findByIdAndDelete(screenshotId);
 
-    const latestScreenshot = await Screenshot.findOne({ userId: screenshot.userId })
+    const latestScreenshot = await Screenshot.findOne({ adminId: req.adminId, userId: screenshot.userId })
       .sort({ timestamp: -1 })
       .select('timestamp')
       .lean();

@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 
 const trackingSchema = new mongoose.Schema({
+  adminId: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin', index: true, default: null },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   deviceId: { type: String, trim: true, default: 'unknown-device' },
   app: { type: String, required: true, trim: true },
@@ -25,5 +26,8 @@ const trackingSchema = new mongoose.Schema({
 trackingSchema.index({ userId: 1, timestamp: -1 });
 trackingSchema.index({ userEmail: 1, timestamp: -1 });
 trackingSchema.index({ timestamp: -1 });
+trackingSchema.index({ adminId: 1, userId: 1, timestamp: -1 });
+trackingSchema.index({ adminId: 1, userEmail: 1, timestamp: -1 });
+trackingSchema.index({ adminId: 1, timestamp: -1 });
 
 module.exports = mongoose.models.TrackingEntry || mongoose.model('TrackingEntry', trackingSchema);

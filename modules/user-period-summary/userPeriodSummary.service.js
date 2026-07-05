@@ -143,10 +143,11 @@ async function getUserPeriodSummaryWithOptions(identifier, options = {}) {
     ranges.selectedRange = selectedRange;
   }
 
-  const userQuery = buildUserScopedQuery(identifier);
+  const userQuery = buildUserScopedQuery(identifier, options.adminId);
   const lookupQuery = buildUserLookupQuery({
     userId: identifier,
     userEmail: identifier,
+    adminId: options.adminId,
   });
 
   const [user, aggregates] = await Promise.all([

@@ -126,7 +126,10 @@ function sortUsersByPresence(users) {
 
 router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
   try {
-    const users = await User.find({}, 'username email department designation profilePicture createdAt lastSeenAt lastScreenshotAt');
+    const users = await User.find(
+      { adminId: req.adminId },
+      'username email department designation profilePicture createdAt lastSeenAt lastScreenshotAt'
+    );
     res.json({ success: true, data: sortUsersByPresence(users.map(serializeUser)) });
   } catch (error) {
     console.error('[Backend] Get users error:', error);
@@ -152,6 +155,7 @@ router.post('/', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybePa
     const normalizedDesignation = String(designation || '').trim();
 
     const existingUser = await User.findOne({
+      adminId: req.adminId,
       $or: [{ email: normalizedEmail }, { username: normalizedUsername }],
     });
 
@@ -160,6 +164,7 @@ router.post('/', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybePa
     }
 
     const user = new User({
+      adminId: req.adminId,
       username: normalizedUsername,
       email: normalizedEmail,
       password: String(password),
@@ -218,7 +223,7 @@ router.put('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybe
       return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
     }
 
-    const user = await User.findById(userId);
+    const user = await User.findOne({ _id: userId, adminId: req.adminId });
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -239,6 +244,7 @@ router.put('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybe
 
     const existingUser = duplicateChecks.length
       ? await User.findOne({
+          adminId: req.adminId,
           _id: { $ne: userId },
           $or: duplicateChecks,
         })
@@ -309,7 +315,7 @@ router.delete('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, as
       return res.status(400).json({ success: false, message: 'A valid user id is required' });
     }
 
-    const deletedUser = await User.findByIdAndDelete(userId);
+    const deletedUser = await User.findOneAndDelete({ _id: userId, adminId: req.adminId });
     if (!deletedUser) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }

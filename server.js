@@ -8,6 +8,7 @@ async function startServer() {
     const { getCloudinaryConfigStatus } = require('./config/cloudinary');
     const { PORT, HOST } = require('./config/constants');
     const { connectToDatabase } = require('./services/database');
+    const { backfillExistingDataToDefaultAdmin } = require('./services/adminBootstrap');
     const { startScreenshotCleanupJob } = require('./jobs/screenshotCleanup');
 
     const cloudinaryConfigStatus = getCloudinaryConfigStatus();
@@ -19,6 +20,7 @@ async function startServer() {
     }
 
     await connectToDatabase();
+    await backfillExistingDataToDefaultAdmin();
     startScreenshotCleanupJob();
 
     app.listen(PORT, HOST, () => {

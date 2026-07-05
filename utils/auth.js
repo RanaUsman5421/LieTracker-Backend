@@ -4,7 +4,14 @@ const { JWT_SECRET } = require('../config/constants');
 
 function createAuthToken(user, sessionId) {
   return jwt.sign(
-    { userId: user._id, username: user.username, email: user.email, sessionId },
+    {
+      scope: 'tracked-user',
+      userId: user._id,
+      adminId: user.adminId,
+      username: user.username,
+      email: user.email,
+      sessionId,
+    },
     JWT_SECRET,
     { expiresIn: '7d' }
   );

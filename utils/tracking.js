@@ -58,7 +58,18 @@ function buildUserAggregationKey() {
   };
 }
 
-function buildUserScopedQuery(identifier) {
+function appendAdminScope(query, adminId) {
+  if (!adminId) {
+    return query;
+  }
+
+  return {
+    ...query,
+    adminId,
+  };
+}
+
+function buildUserScopedQuery(identifier, adminId) {
   const normalizedIdentifier = normalizeIdentifier(identifier);
   const rawIdentifier = normalizeObjectId(identifier);
   const userScopedQuery = [];
@@ -71,10 +82,13 @@ function buildUserScopedQuery(identifier) {
     userScopedQuery.push({ userId: new mongoose.Types.ObjectId(rawIdentifier) });
   }
 
-  return userScopedQuery.length > 1 ? { $or: userScopedQuery } : (userScopedQuery[0] || {});
+  return appendAdminScope(
+    userScopedQuery.length > 1 ? { $or: userScopedQuery } : (userScopedQuery[0] || {}),
+    adminId
+  );
 }
 
-function buildUserLookupQuery({ userId, userEmail }) {
+function buildUserLookupQuery({ userId, userEmail, adminId }) {
   const normalizedUserEmail = normalizeIdentifier(userEmail);
   const normalizedUserId = normalizeObjectId(userId);
   const userLookupQuery = [];
@@ -87,10 +101,14 @@ function buildUserLookupQuery({ userId, userEmail }) {
     userLookupQuery.push({ _id: new mongoose.Types.ObjectId(normalizedUserId) });
   }
 
-  return userLookupQuery.length > 1 ? { $or: userLookupQuery } : (userLookupQuery[0] || {});
+  return appendAdminScope(
+    userLookupQuery.length > 1 ? { $or: userLookupQuery } : (userLookupQuery[0] || {}),
+    adminId
+  );
 }
 
 module.exports = {
+  appendAdminScope,
   buildResolvedActiveDurationExpression,
   buildResolvedInactiveDurationExpression,
   buildUserAggregationKey,

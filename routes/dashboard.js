@@ -16,7 +16,7 @@ router.use(requireDashboardAuthenticatedAdmin);
 
 router.get('/summary', async (req, res) => {
   try {
-    const summary = await withCachedSummary('dashboard-summary', async () => {
+    const summary = await withCachedSummary(`dashboard-summary:${req.adminId}`, async () => {
       const { todayStart, yesterdayStart, weekStart, rangeEnd } = getDateRangeForRecentDays(7);
       const resolvedActiveDuration = buildResolvedActiveDurationExpression();
       const resolvedInactiveDuration = buildResolvedInactiveDurationExpression();
@@ -24,6 +24,7 @@ router.get('/summary', async (req, res) => {
         TrackingEntry.aggregate([
           {
             $match: {
+              adminId: req.adminId,
               timestamp: {
                 $gte: weekStart,
                 $lt: rangeEnd,
@@ -105,6 +106,7 @@ router.get('/summary', async (req, res) => {
         Screenshot.aggregate([
           {
             $match: {
+              adminId: req.adminId,
               timestamp: {
                 $gte: todayStart,
                 $lt: rangeEnd,
