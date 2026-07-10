@@ -9,6 +9,7 @@ const userSchema = new mongoose.Schema({
   activeSessionId: { type: String, trim: true, default: null },
   department: { type: String, trim: true, default: '' },
   designation: { type: String, trim: true, default: '' },
+  dutyHours: { type: Number, default: 8, min: 0 },
   profilePicture: {
     imageUrl: { type: String, trim: true, default: '' },
     publicId: { type: String, trim: true, default: '' },

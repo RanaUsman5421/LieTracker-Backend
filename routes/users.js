@@ -79,6 +79,7 @@ function serializeUser(user) {
     email: user.email,
     department: user.department,
     designation: user.designation,
+    dutyHours: user.dutyHours ?? 8,
     profilePicture: user.profilePicture?.imageUrl
       ? {
           imageUrl: user.profilePicture.imageUrl,
@@ -128,7 +129,7 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
   try {
     const users = await User.find(
       { adminId: req.adminId },
-      'username email department designation profilePicture createdAt lastSeenAt lastScreenshotAt'
+      'username email department designation dutyHours profilePicture createdAt lastSeenAt lastScreenshotAt'
     );
     res.json({ success: true, data: sortUsersByPresence(users.map(serializeUser)) });
   } catch (error) {
@@ -139,7 +140,7 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
 
 router.post('/', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybeParseProfilePicture, async (req, res) => {
   try {
-    const { username, email, password, department, designation } = req.body;
+    const { username, email, password, department, designation, dutyHours } = req.body;
 
     if (!username || !email || !password) {
       return res.status(400).json({ success: false, message: 'Please provide username, email and password' });
@@ -153,6 +154,10 @@ router.post('/', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybePa
     const normalizedEmail = String(email).trim().toLowerCase();
     const normalizedDepartment = String(department || '').trim();
     const normalizedDesignation = String(designation || '').trim();
+    const parsedDutyHours = Number(dutyHours);
+    const normalizedDutyHours = Number.isFinite(parsedDutyHours) && parsedDutyHours >= 0
+      ? parsedDutyHours
+      : 8;
 
     const existingUser = await User.findOne({
       adminId: req.adminId,
@@ -170,6 +175,7 @@ router.post('/', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybePa
       password: String(password),
       department: normalizedDepartment,
       designation: normalizedDesignation,
+      dutyHours: normalizedDutyHours,
     });
 
     let nextProfilePicture = null;
@@ -202,7 +208,7 @@ router.post('/', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybePa
 
 router.put('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybeParseProfilePicture, async (req, res) => {
   try {
-    const { username, email, password, department, designation } = req.body;
+    const { username, email, password, department, designation, dutyHours } = req.body;
     const userId = String(req.params.id || '').trim();
 
     if (!userId) {
@@ -213,6 +219,7 @@ router.put('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybe
     const hasEmail = typeof email !== 'undefined';
     const hasDepartment = typeof department !== 'undefined';
     const hasDesignation = typeof designation !== 'undefined';
+    const hasDutyHours = typeof dutyHours !== 'undefined';
     const normalizedUsername = hasUsername ? String(username || '').trim() : '';
     const normalizedEmail = hasEmail ? String(email || '').trim().toLowerCase() : '';
     const normalizedPassword = String(password || '');
@@ -229,6 +236,10 @@ router.put('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybe
     }
 
     const duplicateChecks = [];
+    const parsedDutyHoursValue = hasDutyHours && dutyHours !== null && dutyHours !== '' ? Number(dutyHours) : null;
+    const normalizedDutyHours = hasDutyHours && parsedDutyHoursValue !== null && Number.isFinite(parsedDutyHoursValue) && parsedDutyHoursValue >= 0
+      ? parsedDutyHoursValue
+      : user.dutyHours ?? 8;
 
     if (hasEmail && normalizedEmail && normalizedEmail !== user.email) {
       duplicateChecks.push({ email: normalizedEmail });
@@ -268,6 +279,10 @@ router.put('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybe
 
     if (hasDesignation) {
       user.designation = normalizedDesignation;
+    }
+
+    if (hasDutyHours) {
+      user.dutyHours = normalizedDutyHours;
     }
 
     if (normalizedPassword) {
