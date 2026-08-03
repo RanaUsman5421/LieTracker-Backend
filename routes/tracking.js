@@ -17,6 +17,8 @@ const {
 const { getUserPresence, ONLINE_WINDOW_MS } = require('../utils/presence');
 
 const router = express.Router();
+const SCREENSHOT_SEGMENT_MS = 15 * 60 * 1000;
+const EXPECTED_EVENTS_PER_SEGMENT = 15;
 const trackingWriteRateLimit = createRateLimiter({
   windowMs: 60 * 1000,
   maxRequests: 240,
@@ -30,6 +32,108 @@ function normalizeTimelineDate(value) {
 
   const date = value instanceof Date ? value : new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function resolveEntryDurations(entry) {
+  const duration = Math.max(0, Number(entry?.duration) || 0);
+  let activeDuration = Math.max(0, Number(entry?.activeDuration) || 0);
+  let inactiveDuration = Math.max(0, Number(entry?.inactiveDuration) || 0);
+
+  if (activeDuration === 0 && inactiveDuration === 0 && duration > 0) {
+    if (entry?.classification === 'idle') {
+      inactiveDuration = duration;
+    } else {
+      activeDuration = duration;
+    }
+  }
+
+  if (activeDuration + inactiveDuration > duration) {
+    const overflow = activeDuration + inactiveDuration - duration;
+    inactiveDuration = Math.max(0, inactiveDuration - overflow);
+  }
+
+  return {
+    duration,
+    activeDuration,
+    inactiveDuration,
+    keystrokes: Math.max(0, Number(entry?.keystrokes) || 0),
+    mouseClicks: Math.max(0, Number(entry?.mouseClicks) || 0),
+    mouseMovements: Math.max(0, Number(entry?.mouseMovements) || 0),
+    activityEvents: Math.max(0, Number(entry?.activityEvents) || 0),
+  };
+}
+
+function calculateSegmentMetrics(trackingEntries, segmentStart, segmentEnd) {
+  const segmentStartMs = segmentStart.getTime();
+  const segmentEndMs = segmentEnd.getTime();
+
+  return trackingEntries.reduce(
+    (totals, entry) => {
+      const startedAt = normalizeTimelineDate(entry.timestamp);
+      if (!startedAt) {
+        return totals;
+      }
+
+      const entryMetrics = resolveEntryDurations(entry);
+      const entryStartMs = startedAt.getTime();
+      const entryEndMs = entryStartMs + entryMetrics.duration;
+      const overlapMs = Math.max(
+        0,
+        Math.min(entryEndMs, segmentEndMs) - Math.max(entryStartMs, segmentStartMs)
+      );
+
+      if (!overlapMs) {
+        return totals;
+      }
+
+      const ratio = entryMetrics.duration > 0 ? overlapMs / entryMetrics.duration : 1;
+      totals.duration += overlapMs;
+      totals.activeDuration += entryMetrics.activeDuration * ratio;
+      totals.inactiveDuration += entryMetrics.inactiveDuration * ratio;
+      totals.keystrokes += entryMetrics.keystrokes * ratio;
+      totals.mouseClicks += entryMetrics.mouseClicks * ratio;
+      totals.mouseMovements += entryMetrics.mouseMovements * ratio;
+      totals.activityEvents += entryMetrics.activityEvents * ratio;
+      return totals;
+    },
+    {
+      duration: 0,
+      activeDuration: 0,
+      inactiveDuration: 0,
+      keystrokes: 0,
+      mouseClicks: 0,
+      mouseMovements: 0,
+      activityEvents: 0,
+    }
+  );
+}
+
+function roundSegmentMetrics(metrics) {
+  return Object.fromEntries(
+    Object.entries(metrics).map(([key, value]) => [
+      key,
+      Math.round((Number(value) || 0) * 100) / 100,
+    ])
+  );
+}
+
+function addSegmentActivityMetrics(metrics) {
+  const safeMetrics = metrics || {};
+  const activeDuration = Math.max(0, Number(safeMetrics.activeDuration) || 0);
+  const inactiveDuration = Math.max(0, Number(safeMetrics.inactiveDuration) || 0);
+  const trackedDuration = activeDuration + inactiveDuration;
+  const activityEvents = Math.max(0, Number(safeMetrics.activityEvents) || 0);
+  const activeTimeScore = trackedDuration > 0 ? (activeDuration / trackedDuration) * 100 : 0;
+  const inputEventScore = Math.min(100, (activityEvents / EXPECTED_EVENTS_PER_SEGMENT) * 100);
+  const performanceScore = (activeTimeScore * inputEventScore) / 100;
+
+  return roundSegmentMetrics({
+    ...safeMetrics,
+    expectedActivityEvents: EXPECTED_EVENTS_PER_SEGMENT,
+    activeTimeScore,
+    inputEventScore,
+    performanceScore,
+  });
 }
 
 function buildPresenceSessions({ trackingEntries, screenshots, rangeStart, rangeEnd }) {
@@ -92,12 +196,31 @@ function buildPresenceSessions({ trackingEntries, screenshots, rangeStart, range
     const endedAt = new Date(Math.min(session.lastActivityAt.getTime() + ONLINE_WINDOW_MS, rangeEnd.getTime()));
 
     if (startedAt < endedAt) {
-      sessions.push({
-        id: `online-${index + 1}`,
-        status: 'online',
-        startedAt: startedAt.toISOString(),
-        endedAt: endedAt.toISOString(),
-      });
+      let segmentIndex = 1;
+      let segmentStartedAt = startedAt;
+
+      while (segmentStartedAt < endedAt) {
+        const segmentEndedAt = new Date(
+          Math.min(segmentStartedAt.getTime() + SCREENSHOT_SEGMENT_MS, endedAt.getTime())
+        );
+        const isCompleteSegment =
+          segmentEndedAt.getTime() - segmentStartedAt.getTime() >= SCREENSHOT_SEGMENT_MS &&
+          segmentEndedAt.getTime() <= Date.now();
+        const metrics = calculateSegmentMetrics(trackingEntries, segmentStartedAt, segmentEndedAt);
+
+        sessions.push({
+          id: `online-${index + 1}-segment-${segmentIndex}`,
+          status: 'online',
+          startedAt: segmentStartedAt.toISOString(),
+          endedAt: segmentEndedAt.toISOString(),
+          segmentDurationMs: SCREENSHOT_SEGMENT_MS,
+          isCompleteSegment,
+          metrics: addSegmentActivityMetrics(metrics),
+        });
+
+        segmentStartedAt = segmentEndedAt;
+        segmentIndex += 1;
+      }
     }
 
     const nextSession = onlineSessions[index + 1];
@@ -287,7 +410,7 @@ router.get('/user/:identifier/presence-sessions', requireDashboardAuthenticatedA
         ...userQuery,
         timestamp: { $gte: start, $lt: end },
       })
-        .select('timestamp duration')
+        .select('timestamp duration activeDuration inactiveDuration classification keystrokes mouseClicks mouseMovements activityEvents')
         .sort({ timestamp: 1 })
         .lean(),
       matchedUser?._id

@@ -9,6 +9,7 @@ const dashboardRouter = require('./routes/dashboard');
 const dashboardAuthRouter = require('./routes/dashboardAuth');
 const userPeriodSummaryRouter = require('./routes/userPeriodSummary');
 const updatesRouter = require('./routes/updates');
+const morgan = require('morgan');
 
 const app = express();
 const allowedOrigins = CORS_ALLOWED_ORIGINS
@@ -25,6 +26,7 @@ app.use(cors({
     callback(new Error('Not allowed by CORS'));
   },
 }));
+app.use(morgan('combined'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
