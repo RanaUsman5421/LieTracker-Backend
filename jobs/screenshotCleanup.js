@@ -1,8 +1,15 @@
 const cron = require('node-cron');
-const cloudinary = require('../config/cloudinary');
 const Screenshot = require('../models/Screenshot');
 const User = require('../models/User');
 const { clearSummaryCache } = require('../services/summaryCache');
+const {
+  destroyCloudinaryAsset,
+} = require('../services/cloudinaryStorage');
+const {
+  getDefaultCloudinaryAccountKey,
+  getLegacyCloudinaryAccountKey,
+  normalizeKey,
+} = require('../services/cloudinaryAccounts');
 
 const RETENTION_DAYS = 30;
 const CLEANUP_BATCH_SIZE = 100;
@@ -11,13 +18,24 @@ const CLEANUP_TIMEZONE = process.env.SCREENSHOT_CLEANUP_TIMEZONE || 'Asia/Karach
 
 let cleanupInProgress = false;
 
-async function deleteCloudinaryImage(publicId) {
+async function deleteCloudinaryImage(publicId, accountKey) {
   if (!publicId) {
     return;
   }
 
-  await cloudinary.uploader.destroy(publicId, {
-    resource_type: 'image',
+  const resolvedAccountKey =
+    normalizeKey(accountKey) ||
+    getLegacyCloudinaryAccountKey() ||
+    getDefaultCloudinaryAccountKey();
+
+  if (!resolvedAccountKey) {
+    return;
+  }
+
+  await destroyCloudinaryAsset({
+    publicId,
+    accountKey: resolvedAccountKey,
+    resourceType: 'image',
   });
 }
 
@@ -56,7 +74,7 @@ async function cleanupOldScreenshots() {
       }
 
       const oldScreenshots = await Screenshot.find(query)
-        .select('_id userId publicId timestamp')
+        .select('_id userId publicId cloudinaryAccountKey timestamp')
         .sort({ timestamp: 1 })
         .limit(CLEANUP_BATCH_SIZE)
         .lean();
@@ -69,7 +87,7 @@ async function cleanupOldScreenshots() {
 
       for (const screenshot of oldScreenshots) {
         try {
-          await deleteCloudinaryImage(screenshot.publicId);
+          await deleteCloudinaryImage(screenshot.publicId, screenshot.cloudinaryAccountKey);
           deletableIds.push(screenshot._id);
           affectedUserIds.add(String(screenshot.userId));
         } catch (error) {

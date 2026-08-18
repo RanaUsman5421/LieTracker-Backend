@@ -6,6 +6,7 @@ const screenshotSchema = new mongoose.Schema({
   deviceId: { type: String, required: true, trim: true },
   imageUrl: { type: String, required: true, trim: true },
   publicId: { type: String, required: true, trim: true },
+  cloudinaryAccountKey: { type: String, trim: true, default: '' },
   timestamp: { type: Date, default: Date.now, index: true },
 }, {
   timestamps: true,

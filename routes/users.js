@@ -1,10 +1,23 @@
 const express = require('express');
-const cloudinary = require('../config/cloudinary');
 const { profilePictureUpload } = require('../config/multer');
 const User = require('../models/User');
 const { requireDashboardAuthenticatedAdmin } = require('../middleware/requireDashboardAuth');
 const { createRateLimiter } = require('../middleware/rateLimit');
 const { handleMulterError } = require('../middleware/uploadErrorHandler');
+const {
+  getDefaultCloudinaryAccountKey,
+  getLegacyCloudinaryAccountKey,
+  isValidCloudinaryAccountKey,
+  normalizeKey,
+} = require('../services/cloudinaryAccounts');
+const {
+  destroyCloudinaryAsset,
+  uploadBufferToCloudinary,
+} = require('../services/cloudinaryStorage');
+const {
+  cacheUserCloudinaryAccount,
+  clearUserCloudinaryAccountCache,
+} = require('../services/cloudinaryAssignment');
 const { getUserPresence } = require('../utils/presence');
 
 const router = express.Router();
@@ -23,46 +36,64 @@ function maybeParseProfilePicture(req, res, next) {
   profilePictureUpload.single('profilePicture')(req, res, next);
 }
 
-function uploadProfilePicture({ buffer, userId }) {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      {
-        folder: `monitask/profile-pictures/${userId}`,
-        resource_type: 'image',
-        format: 'webp',
-        quality: 'auto',
-      },
-      (error, result) => {
-        if (error) {
-          reject(error);
-          return;
-        }
+function normalizeCloudinaryAccountSelection(value) {
+  const normalizedValue = normalizeKey(value);
 
-        resolve(result);
-      }
-    );
+  if (!normalizedValue) {
+    return '';
+  }
 
-    stream.end(buffer);
-  });
+  if (isValidCloudinaryAccountKey(normalizedValue)) {
+    return normalizedValue;
+  }
+
+  return null;
 }
 
-async function replaceProfilePicture({ file, userId }) {
-  const uploaded = await uploadProfilePicture({ buffer: file.buffer, userId });
+async function uploadProfilePicture({ file, user }) {
+  const explicitAccountKey = normalizeCloudinaryAccountSelection(user.cloudinaryAccountKey);
+  const fallbackAccountKey =
+    explicitAccountKey ||
+    getLegacyCloudinaryAccountKey() ||
+    getDefaultCloudinaryAccountKey();
+  if (!fallbackAccountKey) {
+    throw new Error('No Cloudinary account is configured for profile picture uploads');
+  }
+
+  const uploaded = await uploadBufferToCloudinary({
+    buffer: file.buffer,
+    filename: file.originalname || `profile_${String(user._id || Date.now())}.png`,
+    accountKey: fallbackAccountKey,
+    folder: `monitask/profile-pictures/${user._id}`,
+    resourceType: 'image',
+  });
 
   return {
     imageUrl: uploaded.secure_url,
     publicId: uploaded.public_id,
+    cloudinaryAccountKey: fallbackAccountKey,
   };
 }
 
-async function destroyProfilePicture(publicId) {
+async function destroyProfilePicture(publicId, accountKey) {
   if (!publicId) {
     return;
   }
 
   try {
-    await cloudinary.uploader.destroy(publicId, {
-      resource_type: 'image',
+    const resolvedAccountKey =
+      normalizeCloudinaryAccountSelection(accountKey) ||
+      getLegacyCloudinaryAccountKey() ||
+      getDefaultCloudinaryAccountKey();
+
+    if (!resolvedAccountKey) {
+      return;
+    }
+
+    await destroyCloudinaryAsset({
+      publicId,
+      accountKey: resolvedAccountKey,
+      resourceType: 'image',
     });
   } catch (error) {
     console.warn('[Backend] Failed to delete profile picture:', error.message || error);
@@ -80,10 +111,12 @@ function serializeUser(user) {
     department: user.department,
     designation: user.designation,
     dutyHours: user.dutyHours ?? 8,
+    cloudinaryAccountKey: user.cloudinaryAccountKey || '',
     profilePicture: user.profilePicture?.imageUrl
       ? {
           imageUrl: user.profilePicture.imageUrl,
           publicId: user.profilePicture.publicId,
+          cloudinaryAccountKey: user.profilePicture.cloudinaryAccountKey || '',
         }
       : null,
     createdAt: user.createdAt,
@@ -129,7 +162,7 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
   try {
     const users = await User.find(
       { adminId: req.adminId },
-      'username email department designation dutyHours profilePicture createdAt lastSeenAt lastScreenshotAt'
+      'username email department designation dutyHours cloudinaryAccountKey profilePicture createdAt lastSeenAt lastScreenshotAt'
     );
     res.json({ success: true, data: sortUsersByPresence(users.map(serializeUser)) });
   } catch (error) {
@@ -140,7 +173,7 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
 
 router.post('/', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybeParseProfilePicture, async (req, res) => {
   try {
-    const { username, email, password, department, designation, dutyHours } = req.body;
+    const { username, email, password, department, designation, dutyHours, cloudinaryAccountKey } = req.body;
 
     if (!username || !email || !password) {
       return res.status(400).json({ success: false, message: 'Please provide username, email and password' });
@@ -154,6 +187,10 @@ router.post('/', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybePa
     const normalizedEmail = String(email).trim().toLowerCase();
     const normalizedDepartment = String(department || '').trim();
     const normalizedDesignation = String(designation || '').trim();
+    const normalizedCloudinaryAccountKey = normalizeCloudinaryAccountSelection(cloudinaryAccountKey);
+    if (cloudinaryAccountKey && normalizedCloudinaryAccountKey === null) {
+      return res.status(400).json({ success: false, message: 'Invalid Cloudinary account selection' });
+    }
     const parsedDutyHours = Number(dutyHours);
     const normalizedDutyHours = Number.isFinite(parsedDutyHours) && parsedDutyHours >= 0
       ? parsedDutyHours
@@ -180,10 +217,15 @@ router.post('/', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybePa
 
     let nextProfilePicture = null;
 
+    if (normalizedCloudinaryAccountKey) {
+      user.cloudinaryAccountKey = normalizedCloudinaryAccountKey;
+      cacheUserCloudinaryAccount(user, normalizedCloudinaryAccountKey);
+    }
+
     if (req.file) {
-      nextProfilePicture = await replaceProfilePicture({
+      nextProfilePicture = await uploadProfilePicture({
         file: req.file,
-        userId: String(user._id),
+        user,
       });
       user.profilePicture = nextProfilePicture;
     }
@@ -191,7 +233,7 @@ router.post('/', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybePa
     try {
       await user.save();
     } catch (error) {
-      await destroyProfilePicture(nextProfilePicture?.publicId);
+      await destroyProfilePicture(nextProfilePicture?.publicId, nextProfilePicture?.cloudinaryAccountKey);
       throw error;
     }
 
@@ -208,7 +250,7 @@ router.post('/', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybePa
 
 router.put('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybeParseProfilePicture, async (req, res) => {
   try {
-    const { username, email, password, department, designation, dutyHours } = req.body;
+    const { username, email, password, department, designation, dutyHours, cloudinaryAccountKey } = req.body;
     const userId = String(req.params.id || '').trim();
 
     if (!userId) {
@@ -220,11 +262,16 @@ router.put('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybe
     const hasDepartment = typeof department !== 'undefined';
     const hasDesignation = typeof designation !== 'undefined';
     const hasDutyHours = typeof dutyHours !== 'undefined';
+    const hasCloudinaryAccountKey = typeof cloudinaryAccountKey !== 'undefined';
     const normalizedUsername = hasUsername ? String(username || '').trim() : '';
     const normalizedEmail = hasEmail ? String(email || '').trim().toLowerCase() : '';
     const normalizedPassword = String(password || '');
     const normalizedDepartment = hasDepartment ? String(department || '').trim() : '';
     const normalizedDesignation = hasDesignation ? String(designation || '').trim() : '';
+    const normalizedCloudinaryAccountKey = normalizeCloudinaryAccountSelection(cloudinaryAccountKey);
+    if (hasCloudinaryAccountKey && cloudinaryAccountKey && normalizedCloudinaryAccountKey === null) {
+      return res.status(400).json({ success: false, message: 'Invalid Cloudinary account selection' });
+    }
 
     if (normalizedPassword && normalizedPassword.length < 6) {
       return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
@@ -281,8 +328,18 @@ router.put('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybe
       user.designation = normalizedDesignation;
     }
 
+    const previousCloudinaryAccountKey = normalizeKey(user.cloudinaryAccountKey);
     if (hasDutyHours) {
       user.dutyHours = normalizedDutyHours;
+    }
+
+    if (hasCloudinaryAccountKey) {
+      user.cloudinaryAccountKey = normalizedCloudinaryAccountKey;
+      if (normalizedCloudinaryAccountKey) {
+        cacheUserCloudinaryAccount(user, normalizedCloudinaryAccountKey);
+      } else {
+        clearUserCloudinaryAccountCache(user);
+      }
     }
 
     if (normalizedPassword) {
@@ -290,12 +347,17 @@ router.put('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybe
     }
 
     const previousProfilePicturePublicId = user.profilePicture?.publicId || '';
+    const previousProfilePictureAccountKey =
+      user.profilePicture?.cloudinaryAccountKey ||
+      previousCloudinaryAccountKey ||
+      getUserCloudinaryAccountKey(user) ||
+      getDefaultCloudinaryAccountKey();
     let nextProfilePicture = null;
 
     if (req.file) {
-      nextProfilePicture = await replaceProfilePicture({
+      nextProfilePicture = await uploadProfilePicture({
         file: req.file,
-        userId: String(user._id),
+        user,
       });
       user.profilePicture = nextProfilePicture;
     }
@@ -303,12 +365,12 @@ router.put('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybe
     try {
       await user.save();
     } catch (error) {
-      await destroyProfilePicture(nextProfilePicture?.publicId);
+      await destroyProfilePicture(nextProfilePicture?.publicId, nextProfilePicture?.cloudinaryAccountKey);
       throw error;
     }
 
     if (nextProfilePicture?.publicId && previousProfilePicturePublicId) {
-      await destroyProfilePicture(previousProfilePicturePublicId);
+      await destroyProfilePicture(previousProfilePicturePublicId, previousProfilePictureAccountKey);
     }
 
     res.json({
@@ -330,10 +392,17 @@ router.delete('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, as
       return res.status(400).json({ success: false, message: 'A valid user id is required' });
     }
 
-    const deletedUser = await User.findOneAndDelete({ _id: userId, adminId: req.adminId });
+    const deletedUser = await User.findOne({ _id: userId, adminId: req.adminId });
     if (!deletedUser) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
+
+    await destroyProfilePicture(
+      deletedUser.profilePicture?.publicId || '',
+      deletedUser.profilePicture?.cloudinaryAccountKey || deletedUser.cloudinaryAccountKey || getDefaultCloudinaryAccountKey()
+    );
+    await User.findByIdAndDelete(userId);
+    clearUserCloudinaryAccountCache(deletedUser);
 
     res.json({
       success: true,

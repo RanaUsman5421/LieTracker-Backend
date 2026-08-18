@@ -6,6 +6,12 @@ const {
   DASHBOARD_ADMIN_PASSWORD,
   DASHBOARD_ADMIN_USERNAME,
 } = require('../config/constants');
+const {
+  getAssignableCloudinaryAccounts,
+} = require('./cloudinaryAccounts');
+const {
+  cacheUserCloudinaryAccount,
+} = require('./cloudinaryAssignment');
 
 function getDefaultAdminEmail() {
   const normalizedUsername = String(DASHBOARD_ADMIN_USERNAME || 'admin')
@@ -57,6 +63,80 @@ async function dropLegacyUserUniqueIndexes() {
   }
 }
 
+async function backfillTopCloudinaryAssignments(adminId, limit = 15) {
+  const accounts = getAssignableCloudinaryAccounts();
+  const assignableAccounts = accounts.filter((account) => account.key !== 'legacy');
+
+  if (!assignableAccounts.length) {
+    console.warn('[Backend] No assignable Cloudinary accounts were configured; skipping user binding backfill');
+    return;
+  }
+
+  const rankedUsers = await TrackingEntry.aggregate([
+    {
+      $match: {
+        adminId,
+        userId: { $ne: null },
+      },
+    },
+    {
+      $group: {
+        _id: '$userId',
+        totalDuration: { $sum: { $ifNull: ['$duration', 0] } },
+        latestTimestamp: { $max: '$timestamp' },
+      },
+    },
+    {
+      $sort: {
+        totalDuration: -1,
+        latestTimestamp: -1,
+        _id: 1,
+      },
+    },
+    {
+      $limit: limit,
+    },
+  ]);
+
+  if (!rankedUsers.length) {
+    console.log('[Backend] No tracked users found for Cloudinary assignment backfill');
+    return;
+  }
+
+  const rankedUserIds = rankedUsers.map((entry) => entry._id).filter(Boolean);
+  const targetUsers = await User.find({
+    _id: { $in: rankedUserIds },
+    adminId,
+  }).select('_id cloudinaryAccountKey').lean();
+
+  const targetUserById = new Map(targetUsers.map((user) => [String(user._id), user]));
+  let updatedCount = 0;
+
+  for (let index = 0; index < rankedUserIds.length; index += 1) {
+    const userId = String(rankedUserIds[index]);
+    const account = assignableAccounts[index % assignableAccounts.length];
+    const existingUser = targetUserById.get(userId);
+
+    if (!existingUser) {
+      continue;
+    }
+
+    await User.updateOne(
+      { _id: existingUser._id, adminId },
+      { $set: { cloudinaryAccountKey: account.key } }
+    );
+    cacheUserCloudinaryAccount(existingUser._id, account.key);
+    updatedCount += 1;
+  }
+
+  console.log('[Backend] Cloudinary assignment backfill complete', {
+    adminId: String(adminId),
+    updatedCount,
+    userCount: rankedUserIds.length,
+    accountKeys: assignableAccounts.map((account) => account.key),
+  });
+}
+
 async function backfillExistingDataToDefaultAdmin() {
   const admin = await ensureDefaultAdmin();
   const missingAdminQuery = {
@@ -96,6 +176,14 @@ async function backfillExistingDataToDefaultAdmin() {
       });
     } catch (error) {
       console.error('[Backend] Admin tracking/screenshot backfill failed:', error);
+    }
+  });
+
+  setImmediate(async () => {
+    try {
+      await backfillTopCloudinaryAssignments(admin._id, 15);
+    } catch (error) {
+      console.error('[Backend] Cloudinary assignment backfill failed:', error);
     }
   });
 

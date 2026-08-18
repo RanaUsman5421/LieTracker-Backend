@@ -1,6 +1,5 @@
 const express = require('express');
 const mongoose = require('mongoose');
-const cloudinary = require('../config/cloudinary');
 const Screenshot = require('../models/Screenshot');
 const User = require('../models/User');
 const { screenshotUpload } = require('../config/multer');
@@ -10,6 +9,19 @@ const { createRateLimiter } = require('../middleware/rateLimit');
 const { handleMulterError } = require('../middleware/uploadErrorHandler');
 const { clearSummaryCache } = require('../services/summaryCache');
 const { getDateBoundsFromQuery } = require('../utils/date');
+const {
+  getDefaultCloudinaryAccountKey,
+  getLegacyCloudinaryAccountKey,
+  isValidCloudinaryAccountKey,
+  normalizeKey,
+} = require('../services/cloudinaryAccounts');
+const {
+  destroyCloudinaryAsset,
+  uploadBufferToCloudinary,
+} = require('../services/cloudinaryStorage');
+const {
+  cacheUserCloudinaryAccount,
+} = require('../services/cloudinaryAssignment');
 
 const router = express.Router();
 const screenshotUploadRateLimit = createRateLimiter({
@@ -18,36 +30,34 @@ const screenshotUploadRateLimit = createRateLimiter({
   message: 'Too many screenshot uploads. Please try again shortly.',
 });
 
-function uploadToCloudinary({ buffer, userId }) {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      {
-        folder: `monitask/screenshots/${userId}`,
-        resource_type: 'image',
-        format: 'webp',
-        quality: 'auto',
-      },
-      (error, result) => {
-        if (error) {
-          reject(error);
-          return;
-        }
+function resolveScreenshotCloudinaryAccountKey(user) {
+  const explicitAccountKey = normalizeKey(user?.cloudinaryAccountKey);
+  if (explicitAccountKey && isValidCloudinaryAccountKey(explicitAccountKey)) {
+    cacheUserCloudinaryAccount(user, explicitAccountKey);
+    return explicitAccountKey;
+  }
 
-        resolve(result);
-      }
-    );
-
-    stream.end(buffer);
-  });
+  return getLegacyCloudinaryAccountKey() || getDefaultCloudinaryAccountKey();
 }
 
-async function deleteFromCloudinary(publicId) {
+async function deleteFromCloudinary(publicId, accountKey) {
   if (!publicId) {
     return;
   }
 
-  await cloudinary.uploader.destroy(publicId, {
-    resource_type: 'image',
+  const resolvedAccountKey =
+    normalizeKey(accountKey) ||
+    getLegacyCloudinaryAccountKey() ||
+    getDefaultCloudinaryAccountKey();
+
+  if (!resolvedAccountKey) {
+    return;
+  }
+
+  await destroyCloudinaryAsset({
+    publicId,
+    accountKey: resolvedAccountKey,
+    resourceType: 'image',
   });
 }
 
@@ -90,9 +100,18 @@ async function createScreenshot(req, res, next) {
     const screenshotTimestamp = Number.isNaN(requestedTimestamp.getTime())
       ? new Date()
       : requestedTimestamp;
-    const uploaded = await uploadToCloudinary({
+    const accountKey = resolveScreenshotCloudinaryAccountKey(req.authUser);
+
+    if (!accountKey) {
+      throw new Error('No Cloudinary account is configured for this user');
+    }
+
+    const uploaded = await uploadBufferToCloudinary({
       buffer: req.file.buffer,
-      userId,
+      filename: req.file.originalname || `screenshot_${Date.now()}.png`,
+      accountKey,
+      folder: `monitask/screenshots/${userId}`,
+      resourceType: 'image',
     });
 
     const screenshot = await Screenshot.create({
@@ -101,6 +120,7 @@ async function createScreenshot(req, res, next) {
       deviceId,
       imageUrl: uploaded.secure_url,
       publicId: uploaded.public_id,
+      cloudinaryAccountKey: accountKey,
       timestamp: screenshotTimestamp,
     });
 
@@ -159,7 +179,7 @@ router.get('/:userId', requireDashboardAuthenticatedAdmin, async (req, res) => {
     }
 
     const screenshots = await Screenshot.find(query)
-      .select('userId deviceId imageUrl timestamp createdAt')
+      .select('userId deviceId imageUrl cloudinaryAccountKey timestamp createdAt')
       .sort({ timestamp: -1 })
       .limit(limit)
       .lean();
@@ -184,7 +204,7 @@ router.delete('/:id', requireDashboardAuthenticatedAdmin, async (req, res) => {
       return res.status(404).json({ success: false, message: 'Screenshot not found' });
     }
 
-    await deleteFromCloudinary(screenshot.publicId);
+    await deleteFromCloudinary(screenshot.publicId, screenshot.cloudinaryAccountKey);
     await Screenshot.findByIdAndDelete(screenshotId);
 
     const latestScreenshot = await Screenshot.findOne({ adminId: req.adminId, userId: screenshot.userId })
@@ -213,7 +233,7 @@ router.delete('/:id', requireDashboardAuthenticatedAdmin, async (req, res) => {
 router.use(handleMulterError);
 router.use((error, req, res, next) => {
   console.error('[Backend] Screenshot route error:', error);
-  const isCloudinaryFailure = Boolean(req.file && (error.code === 'EACCES' || error.name === 'AggregateError'));
+    const isCloudinaryFailure = Boolean(req.file && (error.code === 'EACCES' || error.name === 'AggregateError'));
   const isDatabaseFailure = Boolean(error?.name && (
     error.name === 'MongoServerError' ||
     error.name === 'MongooseError' ||
