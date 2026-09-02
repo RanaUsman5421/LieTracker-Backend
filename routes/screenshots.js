@@ -1,5 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const sharp = require('sharp');
 const Screenshot = require('../models/Screenshot');
 const User = require('../models/User');
 const { screenshotUpload } = require('../config/multer');
@@ -106,9 +107,13 @@ async function createScreenshot(req, res, next) {
       throw new Error('No Cloudinary account is configured for this user');
     }
 
+    const webpBuffer = await sharp(req.file.buffer)
+      .webp({ quality: 75 })
+      .toBuffer();
+
     const uploaded = await uploadBufferToCloudinary({
-      buffer: req.file.buffer,
-      filename: req.file.originalname || `screenshot_${Date.now()}.png`,
+      buffer: webpBuffer,
+      filename: `screenshot_${Date.now()}.webp`,
       accountKey,
       folder: `monitask/screenshots/${userId}`,
       resourceType: 'image',
