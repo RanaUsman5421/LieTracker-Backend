@@ -53,6 +53,21 @@ function serializeAdmin(admin, token, decodedToken = null) {
   };
 }
 
+async function createUniqueGoogleUsername(email) {
+  const emailPrefix = String(email || '').split('@')[0].toLowerCase();
+  const sanitizedPrefix = emailPrefix.replace(/[^a-z0-9_-]/g, '').slice(0, 36);
+  const baseUsername = sanitizedPrefix.length >= 3 ? sanitizedPrefix : 'google-user';
+  let username = baseUsername;
+  let suffix = 1;
+
+  while (await Admin.exists({ username })) {
+    username = `${baseUsername.slice(0, 32)}-${suffix}`;
+    suffix += 1;
+  }
+
+  return username;
+}
+
 router.get('/google/config', (req, res) => {
   if (!GOOGLE_CLIENT_ID) {
     res.status(503).json({ success: false, message: 'Google authentication is not configured' });
@@ -153,6 +168,7 @@ router.post('/login', dashboardAuthRateLimit, async (req, res) => {
 router.post('/google', dashboardAuthRateLimit, async (req, res) => {
   const code = String(req.body?.code || '').trim();
   const redirectUri = String(req.body?.redirectUri || '').trim();
+  const mode = String(req.body?.mode || 'login').trim().toLowerCase();
   const requestOrigin = String(req.get('origin') || '').trim();
   const requestedWith = String(req.get('x-requested-with') || '');
 
@@ -163,6 +179,11 @@ router.post('/google', dashboardAuthRateLimit, async (req, res) => {
 
   if (!code || !redirectUri) {
     res.status(400).json({ success: false, message: 'Google authorization code is required' });
+    return;
+  }
+
+  if (!['login', 'register'].includes(mode)) {
+    res.status(400).json({ success: false, message: 'Invalid Google authentication mode' });
     return;
   }
 
@@ -188,16 +209,36 @@ router.post('/google', dashboardAuthRateLimit, async (req, res) => {
     });
     const googleProfile = ticket.getPayload();
     const email = String(googleProfile?.email || '').trim().toLowerCase();
+    const googleId = String(googleProfile?.sub || '').trim();
 
-    if (!email || googleProfile?.email_verified !== true) {
+    if (!email || !googleId || googleProfile?.email_verified !== true) {
       res.status(401).json({ success: false, message: 'A verified Google email is required' });
       return;
     }
 
-    const admin = await Admin.findOne({ email });
-    if (!admin) {
+    let admin = await Admin.findOne({ email });
+    if (!admin && mode === 'login') {
       res.status(403).json({ success: false, message: 'No dashboard admin account is registered with this Google email' });
       return;
+    }
+
+    if (admin?.googleId && admin.googleId !== googleId) {
+      res.status(409).json({ success: false, message: 'This email is already linked to another Google account' });
+      return;
+    }
+
+    let isNewAdmin = false;
+    if (!admin) {
+      admin = new Admin({
+        name: String(googleProfile?.name || '').trim(),
+        username: await createUniqueGoogleUsername(email),
+        email,
+        googleId,
+        authProvider: 'google',
+      });
+      isNewAdmin = true;
+    } else if (!admin.googleId) {
+      admin.googleId = googleId;
     }
 
     const sessionId = crypto.randomUUID();
@@ -208,7 +249,10 @@ router.post('/google', dashboardAuthRateLimit, async (req, res) => {
     res.json({
       success: true,
       token,
-      data: serializeAdmin(admin, token),
+      data: {
+        ...serializeAdmin(admin, token),
+        isNewAdmin,
+      },
     });
   } catch (error) {
     console.error('[Backend] Google dashboard login error:', error?.message || error);
