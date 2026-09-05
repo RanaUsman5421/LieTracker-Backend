@@ -19,6 +19,8 @@ const PORT = Number(process.env.PORT) || 8080;
 const HOST = '0.0.0.0';
 const SUMMARY_CACHE_TTL_MS = 15000;
 const CORS_ALLOWED_ORIGINS = String(process.env.CORS_ALLOWED_ORIGINS || '').trim();
+const GOOGLE_CLIENT_ID = readRequiredEnv('GOOGLE_CLIENT_ID');
+const GOOGLE_CLIENT_SECRET = readRequiredEnv('GOOGLE_CLIENT_SECRET');
 
 module.exports = {
   JWT_SECRET,
@@ -30,4 +32,6 @@ module.exports = {
   HOST,
   SUMMARY_CACHE_TTL_MS,
   CORS_ALLOWED_ORIGINS,
+  GOOGLE_CLIENT_ID,
+  GOOGLE_CLIENT_SECRET,
 };
