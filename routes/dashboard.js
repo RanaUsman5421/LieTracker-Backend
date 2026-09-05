@@ -3,7 +3,7 @@ const Screenshot = require('../models/Screenshot');
 const TrackingEntry = require('../models/TrackingEntry');
 const { requireDashboardAuthenticatedAdmin } = require('../middleware/requireDashboardAuth');
 const { withCachedSummary } = require('../services/summaryCache');
-const { getDateRangeForRecentDays, getStartOfMonth } = require('../utils/date');
+const { TRACKING_TIME_ZONE, getDateRangeForRecentDays, getStartOfMonth } = require('../utils/date');
 const {
   buildResolvedActiveDurationExpression,
   buildResolvedInactiveDurationExpression,
@@ -22,7 +22,7 @@ router.get('/summary', async (req, res) => {
       const summaryStart = monthStart < weekStart ? monthStart : weekStart;
       const resolvedActiveDuration = buildResolvedActiveDurationExpression();
       const resolvedInactiveDuration = buildResolvedInactiveDurationExpression();
-      const [trackingSummary, screenshotCounts] = await Promise.all([
+      const [trackingSummary, screenshotCounts, hourlyTrackingSummary] = await Promise.all([
         TrackingEntry.aggregate([
           {
             $match: {
@@ -193,6 +193,38 @@ router.get('/summary', async (req, res) => {
             },
           },
         ]),
+        TrackingEntry.aggregate([
+          {
+            $match: {
+              adminId: req.adminId,
+              timestamp: {
+                $gte: todayStart,
+                $lt: rangeEnd,
+              },
+            },
+          },
+          {
+            $group: {
+              _id: {
+                $hour: {
+                  date: '$timestamp',
+                  timezone: TRACKING_TIME_ZONE,
+                },
+              },
+              activeDuration: { $sum: resolvedActiveDuration },
+              inactiveDuration: { $sum: resolvedInactiveDuration },
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              hour: '$_id',
+              activeDuration: 1,
+              inactiveDuration: 1,
+            },
+          },
+          { $sort: { hour: 1 } },
+        ]),
       ]);
 
       const screenshotCountByUserId = new Map(
@@ -207,6 +239,7 @@ router.get('/summary', async (req, res) => {
       return {
         generatedAt: new Date().toISOString(),
         userSummary,
+        hourlyActivity: hourlyTrackingSummary,
       };
     });
 
