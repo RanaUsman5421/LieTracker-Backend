@@ -213,6 +213,7 @@ router.get('/summary', async (req, res) => {
               },
               activeDuration: { $sum: resolvedActiveDuration },
               inactiveDuration: { $sum: resolvedInactiveDuration },
+              activityEvents: { $sum: { $ifNull: ['$activityEvents', 0] } },
             },
           },
           {
@@ -221,6 +222,7 @@ router.get('/summary', async (req, res) => {
               hour: '$_id',
               activeDuration: 1,
               inactiveDuration: 1,
+              activityEvents: 1,
             },
           },
           { $sort: { hour: 1 } },
