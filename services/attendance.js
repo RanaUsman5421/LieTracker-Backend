@@ -58,6 +58,34 @@ function getAttendancePunctuality(
   };
 }
 
+function getUnattendedStatus(
+  dateKey,
+  dutyStartTime,
+  now = new Date(),
+  timeZone = TRACKING_TIME_ZONE
+) {
+  const normalizedDutyStartTime = String(dutyStartTime || '').trim();
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(normalizedDutyStartTime)) {
+    return 'pending';
+  }
+
+  const todayKey = getDayKey(now);
+  if (dateKey < todayKey) {
+    return 'absent';
+  }
+  if (dateKey > todayKey) {
+    return 'pending';
+  }
+
+  const [dutyHour, dutyMinute] = normalizedDutyStartTime.split(':').map(Number);
+  const nowParts = getTimeZoneParts(now, timeZone);
+  const currentSeconds = ((nowParts.hour * 60) + nowParts.minute) * 60 + nowParts.second;
+  const absenceDeadlineSeconds =
+    ((dutyHour * 60) + dutyMinute + LATE_GRACE_MINUTES) * 60;
+
+  return currentSeconds > absenceDeadlineSeconds ? 'absent' : 'pending';
+}
+
 async function finalizeExpiredAttendance(now = new Date()) {
   const todayKey = getDayKey(now);
   const expiredRecords = await Attendance.find({
@@ -136,6 +164,7 @@ module.exports = {
   finalizeExpiredAttendance,
   getAttendancePunctuality,
   getAutomaticCheckoutAt,
+  getUnattendedStatus,
   getWorkedDurationMs,
   serializeAttendance,
 };

@@ -10,6 +10,7 @@ const {
   TRACKING_TIME_ZONE,
   finalizeExpiredAttendance,
   getAttendancePunctuality,
+  getUnattendedStatus,
   getWorkedDurationMs,
   serializeAttendance,
 } = require('../services/attendance');
@@ -251,11 +252,22 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
       const effectiveDutyEndTime = hasScheduleSnapshot
         ? serialized.scheduledDutyEndTime
         : user.dutyEndTime;
-      const punctuality = getAttendancePunctuality(
-        serialized?.checkInAt,
-        effectiveDutyStartTime,
-        serialized?.timezone || TRACKING_TIME_ZONE
-      );
+      const punctuality = serialized
+        ? getAttendancePunctuality(
+            serialized.checkInAt,
+            effectiveDutyStartTime,
+            serialized.timezone || TRACKING_TIME_ZONE
+          )
+        : {
+            status: getUnattendedStatus(
+              requestedDate,
+              effectiveDutyStartTime,
+              now,
+              TRACKING_TIME_ZONE
+            ),
+            lateSeverity: null,
+            lateByMinutes: 0,
+          };
       const dutyStart = formatDutyTime(effectiveDutyStartTime);
       const dutyEnd = formatDutyTime(effectiveDutyEndTime);
       return {
@@ -297,6 +309,8 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
     const graceLate = rows.filter((row) => row.lateSeverity === 'grace').length;
     const severeLate = rows.filter((row) => row.lateSeverity === 'severe').length;
     const onTime = rows.filter((row) => row.status === 'present').length;
+    const absent = rows.filter((row) => row.status === 'absent').length;
+    const pending = rows.filter((row) => row.status === 'pending').length;
     const totalWorkedDurationMs = rows.reduce((sum, row) => sum + row.workedDurationMs, 0);
 
     res.json({
@@ -312,7 +326,8 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
           late,
           graceLate,
           severeLate,
-          absent: Math.max(0, users.length - present),
+          absent,
+          pending,
           checkedIn,
           checkedOut,
           automaticCheckouts,
