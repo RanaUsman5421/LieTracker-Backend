@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const Attendance = require('../models/Attendance');
 const TrackingEntry = require('../models/TrackingEntry');
 const User = require('../models/User');
@@ -155,6 +156,9 @@ router.post('/:id/recheck-decision', requireDashboardAuthenticatedAdmin, async (
     const decision = String(req.body?.decision || '').toLowerCase();
     if (!['approved', 'rejected'].includes(decision)) {
       return res.status(400).json({ success: false, message: 'Decision must be approved or rejected' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid attendance record' });
     }
 
     const now = new Date();
