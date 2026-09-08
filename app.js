@@ -10,6 +10,7 @@ const dashboardAuthRouter = require('./routes/dashboardAuth');
 const cloudinaryAccountsRouter = require('./routes/cloudinaryAccounts');
 const userPeriodSummaryRouter = require('./routes/userPeriodSummary');
 const updatesRouter = require('./routes/updates');
+const attendanceRouter = require('./routes/attendance');
 const morgan = require('morgan');
 
 const app = express();
@@ -39,6 +40,7 @@ app.use('/api/dashboard-auth', dashboardAuthRouter);
 app.use('/api/cloudinary-accounts', cloudinaryAccountsRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/user-period-summary', userPeriodSummaryRouter);
+app.use('/api/attendance', attendanceRouter);
 app.use('/updates', updatesRouter);
 
 app.get('/', (req, res) => {
