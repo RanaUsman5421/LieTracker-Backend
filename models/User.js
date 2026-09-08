@@ -10,6 +10,8 @@ const userSchema = new mongoose.Schema({
   department: { type: String, trim: true, default: '' },
   designation: { type: String, trim: true, default: '' },
   dutyHours: { type: Number, default: 8, min: 0 },
+  dutyStartTime: { type: String, trim: true, default: '' },
+  dutyEndTime: { type: String, trim: true, default: '' },
   cloudinaryAccountKey: { type: String, trim: true, default: '' },
   profilePicture: {
     imageUrl: { type: String, trim: true, default: '' },

@@ -312,17 +312,38 @@ router.post('/', trackingWriteRateLimit, requireAuthenticatedUser, async (req, r
         productivityScore,
         classification,
         sessionId: entry.sessionId ? String(entry.sessionId).trim() : null,
+        batchId: entry.batchId ? String(entry.batchId).trim().slice(0, 100) : null,
+        clientEntryId: entry.clientEntryId
+          ? String(entry.clientEntryId).trim().slice(0, 100)
+          : null,
         userEmail: resolvedUser?.email || requestUserEmail,
         timestamp: entry.timestamp ? new Date(entry.timestamp) : new Date(),
       };
     });
 
-    const saved = await TrackingEntry.insertMany(mappedEntries);
-    clearSummaryCache();
+    const operations = mappedEntries.map((entry) => entry.clientEntryId
+      ? {
+        updateOne: {
+          filter: {
+            userId: entry.userId,
+            deviceId: entry.deviceId,
+            clientEntryId: entry.clientEntryId,
+          },
+          update: { $setOnInsert: entry },
+          upsert: true,
+        },
+      }
+      : { insertOne: { document: entry } });
+    const writeResult = await TrackingEntry.bulkWrite(operations, { ordered: false });
+    const inserted = (writeResult.insertedCount || 0) + (writeResult.upsertedCount || 0);
+    const duplicates = mappedEntries.length - inserted;
+    if (inserted > 0) {
+      clearSummaryCache();
+    }
     if (resolvedUser?._id) {
       await User.findByIdAndUpdate(resolvedUser._id, { lastSeenAt: new Date() });
     }
-    res.json({ success: true, inserted: saved.length });
+    res.json({ success: true, inserted, duplicates });
   } catch (error) {
     console.error('[Backend] Tracking save error:', error);
     res.status(500).json({ success: false, message: 'Unable to save tracking data' });

@@ -17,6 +17,7 @@ const {
 const {
   cacheUserCloudinaryAccount,
   clearUserCloudinaryAccountCache,
+  getUserCloudinaryAccountKey,
 } = require('../services/cloudinaryAssignment');
 const { getUserPresence } = require('../utils/presence');
 
@@ -48,6 +49,17 @@ function normalizeCloudinaryAccountSelection(value) {
   }
 
   return null;
+}
+
+function normalizeDutyTime(value) {
+  const normalizedValue = String(value || '').trim();
+  if (!normalizedValue) {
+    return '';
+  }
+
+  return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(normalizedValue)
+    ? normalizedValue
+    : null;
 }
 
 async function uploadProfilePicture({ file, user }) {
@@ -111,6 +123,8 @@ function serializeUser(user) {
     department: user.department,
     designation: user.designation,
     dutyHours: user.dutyHours ?? 8,
+    dutyStartTime: user.dutyStartTime || '',
+    dutyEndTime: user.dutyEndTime || '',
     cloudinaryAccountKey: user.cloudinaryAccountKey || '',
     profilePicture: user.profilePicture?.imageUrl
       ? {
@@ -162,7 +176,7 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
   try {
     const users = await User.find(
       { adminId: req.adminId },
-      'username email department designation dutyHours cloudinaryAccountKey profilePicture createdAt lastSeenAt lastScreenshotAt'
+      'username email department designation dutyHours dutyStartTime dutyEndTime cloudinaryAccountKey profilePicture createdAt lastSeenAt lastScreenshotAt'
     );
     res.json({ success: true, data: sortUsersByPresence(users.map(serializeUser)) });
   } catch (error) {
@@ -250,7 +264,17 @@ router.post('/', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybePa
 
 router.put('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybeParseProfilePicture, async (req, res) => {
   try {
-    const { username, email, password, department, designation, dutyHours, cloudinaryAccountKey } = req.body;
+    const {
+      username,
+      email,
+      password,
+      department,
+      designation,
+      dutyHours,
+      dutyStartTime,
+      dutyEndTime,
+      cloudinaryAccountKey,
+    } = req.body;
     const userId = String(req.params.id || '').trim();
 
     if (!userId) {
@@ -262,15 +286,23 @@ router.put('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybe
     const hasDepartment = typeof department !== 'undefined';
     const hasDesignation = typeof designation !== 'undefined';
     const hasDutyHours = typeof dutyHours !== 'undefined';
+    const hasDutyStartTime = typeof dutyStartTime !== 'undefined';
+    const hasDutyEndTime = typeof dutyEndTime !== 'undefined';
     const hasCloudinaryAccountKey = typeof cloudinaryAccountKey !== 'undefined';
     const normalizedUsername = hasUsername ? String(username || '').trim() : '';
     const normalizedEmail = hasEmail ? String(email || '').trim().toLowerCase() : '';
     const normalizedPassword = String(password || '');
     const normalizedDepartment = hasDepartment ? String(department || '').trim() : '';
     const normalizedDesignation = hasDesignation ? String(designation || '').trim() : '';
+    const normalizedDutyStartTime = hasDutyStartTime ? normalizeDutyTime(dutyStartTime) : '';
+    const normalizedDutyEndTime = hasDutyEndTime ? normalizeDutyTime(dutyEndTime) : '';
     const normalizedCloudinaryAccountKey = normalizeCloudinaryAccountSelection(cloudinaryAccountKey);
     if (hasCloudinaryAccountKey && cloudinaryAccountKey && normalizedCloudinaryAccountKey === null) {
       return res.status(400).json({ success: false, message: 'Invalid Cloudinary account selection' });
+    }
+
+    if (normalizedDutyStartTime === null || normalizedDutyEndTime === null) {
+      return res.status(400).json({ success: false, message: 'Duty times must use the HH:mm format' });
     }
 
     if (normalizedPassword && normalizedPassword.length < 6) {
@@ -331,6 +363,14 @@ router.put('/:id', userWriteRateLimit, requireDashboardAuthenticatedAdmin, maybe
     const previousCloudinaryAccountKey = normalizeKey(user.cloudinaryAccountKey);
     if (hasDutyHours) {
       user.dutyHours = normalizedDutyHours;
+    }
+
+    if (hasDutyStartTime) {
+      user.dutyStartTime = normalizedDutyStartTime;
+    }
+
+    if (hasDutyEndTime) {
+      user.dutyEndTime = normalizedDutyEndTime;
     }
 
     if (hasCloudinaryAccountKey) {

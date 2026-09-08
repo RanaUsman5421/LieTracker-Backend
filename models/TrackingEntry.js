@@ -18,6 +18,8 @@ const trackingSchema = new mongoose.Schema({
   productivityScore: { type: Number, default: 0, min: 0 },
   classification: { type: String, trim: true, enum: ['active', 'idle'], default: 'active' },
   sessionId: { type: String, trim: true, default: null },
+  batchId: { type: String, trim: true, default: null },
+  clientEntryId: { type: String, trim: true, default: null },
   userEmail: { type: String, trim: true, lowercase: true, default: 'unknown' },
   timestamp: { type: Date, required: true },
   createdAt: { type: Date, default: Date.now },
@@ -29,5 +31,13 @@ trackingSchema.index({ timestamp: -1 });
 trackingSchema.index({ adminId: 1, userId: 1, timestamp: -1 });
 trackingSchema.index({ adminId: 1, userEmail: 1, timestamp: -1 });
 trackingSchema.index({ adminId: 1, timestamp: -1 });
+trackingSchema.index(
+  { userId: 1, deviceId: 1, clientEntryId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { clientEntryId: { $type: 'string' } },
+    name: 'unique_client_tracking_entry',
+  }
+);
 
 module.exports = mongoose.models.TrackingEntry || mongoose.model('TrackingEntry', trackingSchema);
