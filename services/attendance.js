@@ -72,6 +72,9 @@ function serializeAttendance(record, now = new Date()) {
       checkOutAt: value.checkOutAt,
       checkOutMethod: value.checkOutMethod,
       checkOutNote: value.checkOutNote,
+      recheckStatus: value.recheckApproval?.status || 'none',
+      recheckReviewedAt: value.recheckApproval?.reviewedAt || null,
+      recheckCount: Number(value.recheckCount) || 0,
       workedDurationMs: value.checkOutAt
         ? value.workedDurationMs
         : getWorkedDurationMs(value.checkInAt, effectiveEnd),

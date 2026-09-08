@@ -54,6 +54,33 @@ router.post('/check-in', requireAuthenticatedUser, async (req, res) => {
           dateKey,
         });
       }
+    } else if (attendance.state === 'checked_out' && attendance.recheckApproval?.status === 'approved') {
+      const previousCheckout = {
+        checkOutAt: attendance.checkOutAt,
+        checkOutMethod: attendance.checkOutMethod || 'manual',
+        checkOutNote: attendance.checkOutNote || '',
+      };
+      const reopenedAttendance = await Attendance.findOneAndUpdate(
+        {
+          _id: attendance._id,
+          state: 'checked_out',
+          'recheckApproval.status': 'approved',
+        },
+        {
+          $set: {
+            state: 'checked_in',
+            checkOutAt: null,
+            checkOutMethod: null,
+            checkOutNote: '',
+            'recheckApproval.status': 'consumed',
+            'recheckApproval.usedAt': now,
+          },
+          $push: { checkOutHistory: previousCheckout },
+          $inc: { recheckCount: 1 },
+        },
+        { new: true }
+      );
+      attendance = reopenedAttendance || await Attendance.findById(attendance._id);
     }
 
     res.json({ success: true, data: serializeAttendance(attendance, now) });
@@ -88,6 +115,10 @@ router.post('/check-out', requireAuthenticatedUser, async (req, res) => {
             checkOutNote: 'Checked out by employee',
             workedDurationMs: getWorkedDurationMs(attendance.checkInAt, now),
             state: 'checked_out',
+            'recheckApproval.status': 'none',
+            'recheckApproval.reviewedAt': null,
+            'recheckApproval.reviewedBy': null,
+            'recheckApproval.usedAt': null,
           },
         },
         { new: true }
@@ -116,6 +147,49 @@ router.get('/status', requireAuthenticatedUser, async (req, res) => {
   } catch (error) {
     console.error('[Backend] Attendance status error:', error);
     res.status(500).json({ success: false, message: 'Unable to fetch attendance status' });
+  }
+});
+
+router.post('/:id/recheck-decision', requireDashboardAuthenticatedAdmin, async (req, res) => {
+  try {
+    const decision = String(req.body?.decision || '').toLowerCase();
+    if (!['approved', 'rejected'].includes(decision)) {
+      return res.status(400).json({ success: false, message: 'Decision must be approved or rejected' });
+    }
+
+    const now = new Date();
+    await finalizeExpiredAttendance(now);
+    const attendance = await Attendance.findOne({
+      _id: req.params.id,
+      adminId: req.adminId,
+      dateKey: getDayKey(now),
+      state: 'checked_out',
+    });
+
+    if (!attendance) {
+      return res.status(409).json({
+        success: false,
+        message: 'Only a user checked out today can receive re-check-in permission',
+      });
+    }
+
+    attendance.recheckApproval = {
+      status: decision,
+      reviewedAt: now,
+      reviewedBy: req.adminId,
+      usedAt: null,
+    };
+    attendance.recheckHistory.push({
+      decision,
+      reviewedAt: now,
+      reviewedBy: req.adminId,
+    });
+    await attendance.save();
+
+    res.json({ success: true, data: serializeAttendance(attendance, now) });
+  } catch (error) {
+    console.error('[Backend] Attendance re-check-in decision error:', error);
+    res.status(500).json({ success: false, message: 'Unable to save re-check-in decision' });
   }
 });
 
@@ -160,6 +234,12 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
         checkOutAt: serialized?.checkOutAt || null,
         checkOutMethod: serialized?.checkOutMethod || null,
         checkOutNote: serialized?.checkOutNote || '',
+        attendanceId: serialized?.id || null,
+        recheckStatus: serialized?.recheckStatus || 'none',
+        recheckReviewedAt: serialized?.recheckReviewedAt || null,
+        recheckCount: serialized?.recheckCount || 0,
+        canReviewRecheck:
+          requestedDate === getDayKey(now) && serialized?.state === 'checked_out',
         attendanceDurationMs: serialized?.workedDurationMs || 0,
         workedDurationMs: trackedDurationByUser.get(String(user._id)) || 0,
         attendanceState: serialized?.state || 'not_checked_in',

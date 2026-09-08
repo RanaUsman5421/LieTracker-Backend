@@ -18,6 +18,27 @@ const attendanceSchema = new mongoose.Schema({
     default: null,
   },
   checkOutNote: { type: String, trim: true, default: '' },
+  checkOutHistory: [{
+    checkOutAt: { type: Date, required: true },
+    checkOutMethod: { type: String, enum: ['manual', 'automatic_midnight'], required: true },
+    checkOutNote: { type: String, trim: true, default: '' },
+  }],
+  recheckApproval: {
+    status: {
+      type: String,
+      enum: ['none', 'approved', 'rejected', 'consumed'],
+      default: 'none',
+    },
+    reviewedAt: { type: Date, default: null },
+    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin', default: null },
+    usedAt: { type: Date, default: null },
+  },
+  recheckHistory: [{
+    decision: { type: String, enum: ['approved', 'rejected'], required: true },
+    reviewedAt: { type: Date, required: true },
+    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin', required: true },
+  }],
+  recheckCount: { type: Number, min: 0, default: 0 },
   workedDurationMs: { type: Number, min: 0, default: 0 },
   state: {
     type: String,
