@@ -8,6 +8,7 @@ const {
   buildUserScopedQuery,
 } = require('../../utils/tracking');
 const { buildNamedRanges, buildSelectedRange } = require('./dateRanges');
+const { TRACKING_TIME_ZONE } = require('../../utils/date');
 
 const PERIOD_ORDER = [
   'today',
@@ -150,7 +151,10 @@ async function getUserPeriodSummaryWithOptions(identifier, options = {}) {
     adminId: options.adminId,
   });
 
-  const [user, aggregates] = await Promise.all([
+  const detailRange = selectedRange;
+  const resolvedActiveDuration = buildResolvedActiveDurationExpression();
+  const resolvedInactiveDuration = buildResolvedInactiveDurationExpression();
+  const [user, aggregates, dailySummaries, applications] = await Promise.all([
     User.findOne(lookupQuery)
       .select('_id username email department designation createdAt lastSeenAt lastScreenshotAt')
       .lean(),
@@ -159,6 +163,55 @@ async function getUserPeriodSummaryWithOptions(identifier, options = {}) {
         $facet: buildPeriodFacet(userQuery, ranges),
       },
     ]),
+    detailRange
+      ? TrackingEntry.aggregate([
+        { $match: buildRangeMatch(userQuery, detailRange) },
+        {
+          $group: {
+            _id: {
+              $dateToString: {
+                format: '%Y-%m-%d',
+                date: '$timestamp',
+                timezone: TRACKING_TIME_ZONE,
+              },
+            },
+            activeDuration: { $sum: resolvedActiveDuration },
+            inactiveDuration: { $sum: resolvedInactiveDuration },
+            totalDuration: { $sum: { $ifNull: ['$duration', 0] } },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            dayKey: '$_id',
+            activeDuration: 1,
+            inactiveDuration: 1,
+            totalDuration: 1,
+          },
+        },
+        { $sort: { dayKey: 1 } },
+      ])
+      : [],
+    detailRange
+      ? TrackingEntry.aggregate([
+        { $match: buildRangeMatch(userQuery, detailRange) },
+        {
+          $group: {
+            _id: '$app',
+            duration: { $sum: resolvedActiveDuration },
+          },
+        },
+        { $sort: { duration: -1, _id: 1 } },
+        { $limit: 7 },
+        {
+          $project: {
+            _id: 0,
+            name: { $ifNull: ['$_id', 'Unknown'] },
+            duration: 1,
+          },
+        },
+      ])
+      : [],
   ]);
 
   const aggregateBuckets = aggregates[0] || {};
@@ -197,6 +250,14 @@ async function getUserPeriodSummaryWithOptions(identifier, options = {}) {
       }
       : null,
     periods,
+    rangeDetails: detailRange
+      ? {
+        start: detailRange.start.toISOString(),
+        end: detailRange.end.toISOString(),
+        dailySummaries,
+        applications,
+      }
+      : null,
   };
 }
 

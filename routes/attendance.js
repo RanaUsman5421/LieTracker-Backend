@@ -224,17 +224,22 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
 
     await finalizeExpiredAttendance(new Date());
     const { start, end } = getDateBoundsFromQuery(requestedDate);
-    const [users, records, trackedDurations] = await Promise.all([
+    const requestedYear = requestedDate.slice(0, 4);
+    const [users, yearRecords, trackedDurations] = await Promise.all([
       User.find({ adminId: req.adminId })
         .select('_id username email designation department dutyHours dutyStartTime dutyEndTime')
         .sort({ username: 1 })
         .lean(),
-      Attendance.find({ adminId: req.adminId, dateKey: requestedDate }).lean(),
+      Attendance.find({
+        adminId: req.adminId,
+        dateKey: { $gte: `${requestedYear}-01-01`, $lte: `${requestedYear}-12-31` },
+      }).lean(),
       TrackingEntry.aggregate([
         { $match: { adminId: req.adminId, timestamp: { $gte: start, $lt: end } } },
         { $group: { _id: '$userId', durationMs: { $sum: { $ifNull: ['$duration', 0] } } } },
       ]),
     ]);
+    const records = yearRecords.filter((record) => record.dateKey === requestedDate);
     const recordByUser = new Map(records.map((record) => [String(record.userId), record]));
     const trackedDurationByUser = new Map(
       trackedDurations
@@ -282,6 +287,7 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
         dutyStartTime: effectiveDutyStartTime || '',
         dutyEndTime: effectiveDutyEndTime || '',
         checkInAt: serialized?.checkInAt || null,
+        checkInSource: serialized?.checkInSource || null,
         checkOutAt: serialized?.checkOutAt || null,
         checkOutMethod: serialized?.checkOutMethod || null,
         checkOutNote: serialized?.checkOutNote || '',
@@ -312,6 +318,47 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
     const absent = rows.filter((row) => row.status === 'absent').length;
     const pending = rows.filter((row) => row.status === 'pending').length;
     const totalWorkedDurationMs = rows.reduce((sum, row) => sum + row.workedDurationMs, 0);
+    const userById = new Map(users.map((user) => [String(user._id), user]));
+    const dailyAttendance = [...yearRecords.reduce((days, record) => {
+      const user = userById.get(String(record.userId));
+      const dutyStartTime = record.scheduleSnapshotAt
+        ? record.scheduledDutyStartTime
+        : user?.dutyStartTime;
+      const punctuality = getAttendancePunctuality(
+        record.checkInAt,
+        dutyStartTime,
+        record.timezone || TRACKING_TIME_ZONE
+      );
+      const current = days.get(record.dateKey) || {
+        date: record.dateKey,
+        present: 0,
+        onTime: 0,
+        late: 0,
+        graceLate: 0,
+        severeLate: 0,
+        checkedIn: 0,
+        checkedOut: 0,
+        automaticCheckouts: 0,
+      };
+      current.present += 1;
+      current.onTime += punctuality.status === 'present' ? 1 : 0;
+      current.late += punctuality.status === 'late' ? 1 : 0;
+      current.graceLate += punctuality.lateSeverity === 'grace' ? 1 : 0;
+      current.severeLate += punctuality.lateSeverity === 'severe' ? 1 : 0;
+      current.checkedIn += record.state === 'checked_in' ? 1 : 0;
+      current.checkedOut += record.state === 'checked_out' ? 1 : 0;
+      current.automaticCheckouts += record.checkOutMethod === 'automatic_midnight' ? 1 : 0;
+      days.set(record.dateKey, current);
+      return days;
+    }, new Map()).values()]
+      .map((day) => ({
+        ...day,
+        total: users.length,
+        absent: Math.max(0, users.length - day.present),
+        attendanceRate: users.length ? Math.round((day.present / users.length) * 100) : 0,
+        punctualityRate: day.present ? Math.round((day.onTime / day.present) * 100) : 0,
+      }))
+      .sort((left, right) => left.date.localeCompare(right.date));
 
     res.json({
       success: true,
@@ -319,6 +366,7 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
         date: requestedDate,
         range: { start, end },
         rows,
+        dailyAttendance,
         metrics: {
           total: users.length,
           present,
