@@ -280,6 +280,101 @@ function buildPresenceSessions({ trackingEntries, screenshots, rangeStart, range
   return orderedSessions;
 }
 
+function buildActivityRoute({ trackingEntries, rangeStart, rangeEnd }) {
+  const groupedEntries = new Map();
+
+  trackingEntries.forEach((entry) => {
+    const timestamp = normalizeTimelineDate(entry.timestamp);
+    if (!timestamp) return;
+    const key = entry.batchId
+      || (entry.sessionId && entry.sessionId !== 'manual-entry'
+        ? `${entry.sessionId}:${timestamp.toISOString()}:${entry.classification || 'active'}`
+        : String(entry._id));
+    const metrics = resolveEntryDurations(entry);
+    const current = groupedEntries.get(key) || {
+      timestamp,
+      activeDuration: 0,
+      inactiveDuration: 0,
+      endAnchored: Boolean(entry.batchId || entry.clientEntryId),
+    };
+    current.activeDuration += metrics.activeDuration;
+    current.inactiveDuration += metrics.inactiveDuration;
+    groupedEntries.set(key, current);
+  });
+
+  const trackedParts = [...groupedEntries.values()]
+    .flatMap((group) => {
+      const totalDuration = group.activeDuration + group.inactiveDuration;
+      if (!totalDuration) return [];
+      const intervalStart = group.endAnchored
+        ? group.timestamp.getTime() - totalDuration
+        : group.timestamp.getTime();
+      let cursor = intervalStart;
+      return [
+        ...(group.activeDuration
+          ? [{ label: 'Work', start: cursor, end: cursor += group.activeDuration }]
+          : []),
+        ...(group.inactiveDuration
+          ? [{ label: 'Inactive', start: cursor, end: cursor + group.inactiveDuration }]
+          : []),
+      ];
+    })
+    .map((part) => ({
+      ...part,
+      start: Math.max(part.start, rangeStart.getTime()),
+      end: Math.min(part.end, rangeEnd.getTime()),
+    }))
+    .filter((part) => part.end > part.start)
+    .sort((left, right) => left.start - right.start);
+
+  const route = [];
+  if (!trackedParts.length) {
+    return rangeStart < rangeEnd
+      ? [{
+        id: 'activity-offline-full-range',
+        label: 'Offline',
+        startedAt: rangeStart.toISOString(),
+        endedAt: rangeEnd.toISOString(),
+      }]
+      : [];
+  }
+  let cursor = rangeStart.getTime();
+  const append = (label, start, end) => {
+    if (end <= start) return;
+    const previous = route[route.length - 1];
+    if (previous?.label === label && start <= previous.end) {
+      previous.end = Math.max(previous.end, end);
+    } else {
+      route.push({ label, start, end });
+    }
+  };
+
+  trackedParts.forEach((part) => {
+    if (part.end <= cursor) return;
+    const partStart = Math.max(cursor, part.start);
+    if (partStart > cursor) {
+      const graceEnd = Math.min(partStart, cursor + ONLINE_WINDOW_MS);
+      append('Work', cursor, graceEnd);
+      append('Offline', graceEnd, partStart);
+    }
+    append(part.label, partStart, part.end);
+    cursor = Math.max(cursor, part.end);
+  });
+
+  if (cursor < rangeEnd.getTime()) {
+    const graceEnd = Math.min(rangeEnd.getTime(), cursor + ONLINE_WINDOW_MS);
+    append('Work', cursor, graceEnd);
+    append('Offline', graceEnd, rangeEnd.getTime());
+  }
+
+  return route.map((part, index) => ({
+    id: `activity-${index + 1}`,
+    label: part.label,
+    startedAt: new Date(part.start).toISOString(),
+    endedAt: new Date(part.end).toISOString(),
+  }));
+}
+
 router.post('/', trackingWriteRateLimit, requireAuthenticatedUser, async (req, res) => {
   try {
     const entries = Array.isArray(req.body.entries) ? req.body.entries : [];
@@ -467,7 +562,7 @@ router.get('/user/:identifier/presence-sessions', requireDashboardAuthenticatedA
         ...userQuery,
         timestamp: { $gte: start, $lt: end },
       })
-        .select('timestamp duration activeDuration inactiveDuration classification keystrokes mouseClicks mouseMovements activityEvents')
+        .select('timestamp duration activeDuration inactiveDuration classification keystrokes mouseClicks mouseMovements activityEvents batchId clientEntryId sessionId')
         .sort({ timestamp: 1 })
         .lean(),
       matchedUser?._id
@@ -507,6 +602,13 @@ router.get('/user/:identifier/presence-sessions', requireDashboardAuthenticatedA
           ? buildPresenceSessions({
             trackingEntries,
             screenshots,
+            rangeStart: presenceStart,
+            rangeEnd: presenceEnd,
+          })
+          : [],
+        activityRoute: attendance || trackingEntries.length
+          ? buildActivityRoute({
+            trackingEntries,
             rangeStart: presenceStart,
             rangeEnd: presenceEnd,
           })
