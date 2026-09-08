@@ -1,5 +1,13 @@
 const Attendance = require('../models/Attendance');
-const { TRACKING_TIME_ZONE, addDays, getDayKey, parseDayKey } = require('../utils/date');
+const {
+  TRACKING_TIME_ZONE,
+  addDays,
+  getDayKey,
+  getTimeZoneParts,
+  parseDayKey,
+} = require('../utils/date');
+
+const LATE_GRACE_MINUTES = 10;
 
 function getAutomaticCheckoutAt(dateKey) {
   const dayStart = parseDayKey(dateKey);
@@ -13,6 +21,41 @@ function getWorkedDurationMs(checkInAt, checkOutAt) {
     return 0;
   }
   return Math.max(0, endMs - startMs);
+}
+
+function getAttendancePunctuality(
+  checkInAt,
+  dutyStartTime,
+  timeZone = TRACKING_TIME_ZONE
+) {
+  const normalizedDutyStartTime = String(dutyStartTime || '').trim();
+  const timeMatch = /^(?:[01]\d|2[0-3]):[0-5]\d$/.exec(normalizedDutyStartTime);
+  const checkInDate = checkInAt ? new Date(checkInAt) : null;
+
+  if (!timeMatch || !checkInDate || Number.isNaN(checkInDate.getTime())) {
+    return {
+      status: checkInDate ? 'present' : 'absent',
+      lateSeverity: null,
+      lateByMinutes: 0,
+    };
+  }
+
+  const [dutyHour, dutyMinute] = normalizedDutyStartTime.split(':').map(Number);
+  const checkInParts = getTimeZoneParts(checkInDate, timeZone);
+  const dutyStartSeconds = ((dutyHour * 60) + dutyMinute) * 60;
+  const checkInSeconds =
+    ((checkInParts.hour * 60) + checkInParts.minute) * 60 + checkInParts.second;
+  const lateBySeconds = checkInSeconds - dutyStartSeconds;
+
+  if (lateBySeconds <= 0) {
+    return { status: 'present', lateSeverity: null, lateByMinutes: 0 };
+  }
+
+  return {
+    status: 'late',
+    lateSeverity: lateBySeconds <= LATE_GRACE_MINUTES * 60 ? 'grace' : 'severe',
+    lateByMinutes: Math.ceil(lateBySeconds / 60),
+  };
 }
 
 async function finalizeExpiredAttendance(now = new Date()) {
@@ -68,6 +111,9 @@ function serializeAttendance(record, now = new Date()) {
       id: value._id,
       userId: value.userId,
       checkInAt: value.checkInAt,
+      scheduledDutyStartTime: value.scheduledDutyStartTime || '',
+      scheduledDutyEndTime: value.scheduledDutyEndTime || '',
+      scheduleSnapshotAt: value.scheduleSnapshotAt || null,
       checkInSource: value.checkInSource,
       checkOutAt: value.checkOutAt,
       checkOutMethod: value.checkOutMethod,
@@ -85,8 +131,10 @@ function serializeAttendance(record, now = new Date()) {
 }
 
 module.exports = {
+  LATE_GRACE_MINUTES,
   TRACKING_TIME_ZONE,
   finalizeExpiredAttendance,
+  getAttendancePunctuality,
   getAutomaticCheckoutAt,
   getWorkedDurationMs,
   serializeAttendance,

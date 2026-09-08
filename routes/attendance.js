@@ -9,6 +9,7 @@ const { getDateBoundsFromQuery, getDayKey, parseDayKey } = require('../utils/dat
 const {
   TRACKING_TIME_ZONE,
   finalizeExpiredAttendance,
+  getAttendancePunctuality,
   getWorkedDurationMs,
   serializeAttendance,
 } = require('../services/attendance');
@@ -21,6 +22,19 @@ function isValidDateKey(value) {
     ? parseDayKey(normalizedValue)
     : null;
   return Boolean(parsedDate) && getDayKey(parsedDate) === normalizedValue;
+}
+
+function formatDutyTime(value) {
+  const match = /^(\d{2}):(\d{2})$/.exec(String(value || ''));
+  if (!match) {
+    return '';
+  }
+
+  const hour = Number(match[1]);
+  const minute = match[2];
+  const period = hour >= 12 ? 'PM' : 'AM';
+  const displayHour = hour % 12 || 12;
+  return `${String(displayHour).padStart(2, '0')}:${minute} ${period}`;
 }
 
 router.post('/check-in', requireAuthenticatedUser, async (req, res) => {
@@ -43,6 +57,9 @@ router.post('/check-in', requireAuthenticatedUser, async (req, res) => {
           dateKey,
           timezone: TRACKING_TIME_ZONE,
           checkInAt: now,
+          scheduledDutyStartTime: req.authUser.dutyStartTime || '',
+          scheduledDutyEndTime: req.authUser.dutyEndTime || '',
+          scheduleSnapshotAt: now,
           checkInSource: req.body?.source === 'manual_button' ? 'manual_button' : 'tracking_start',
         });
       } catch (error) {
@@ -208,7 +225,7 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
     const { start, end } = getDateBoundsFromQuery(requestedDate);
     const [users, records, trackedDurations] = await Promise.all([
       User.find({ adminId: req.adminId })
-        .select('_id username email designation department dutyHours')
+        .select('_id username email designation department dutyHours dutyStartTime dutyEndTime')
         .sort({ username: 1 })
         .lean(),
       Attendance.find({ adminId: req.adminId, dateKey: requestedDate }).lean(),
@@ -227,13 +244,31 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
     const rows = users.map((user) => {
       const record = recordByUser.get(String(user._id));
       const serialized = record ? serializeAttendance(record, now).record : null;
+      const hasScheduleSnapshot = Boolean(serialized?.scheduleSnapshotAt);
+      const effectiveDutyStartTime = hasScheduleSnapshot
+        ? serialized.scheduledDutyStartTime
+        : user.dutyStartTime;
+      const effectiveDutyEndTime = hasScheduleSnapshot
+        ? serialized.scheduledDutyEndTime
+        : user.dutyEndTime;
+      const punctuality = getAttendancePunctuality(
+        serialized?.checkInAt,
+        effectiveDutyStartTime,
+        serialized?.timezone || TRACKING_TIME_ZONE
+      );
+      const dutyStart = formatDutyTime(effectiveDutyStartTime);
+      const dutyEnd = formatDutyTime(effectiveDutyEndTime);
       return {
         userId: user._id,
         name: user.username || user.email,
         email: user.email,
         role: user.designation || 'Employee',
         department: user.department || '',
-        shift: `${Number(user.dutyHours ?? 8)}h duty`,
+        shift: dutyStart && dutyEnd
+          ? `${dutyStart} – ${dutyEnd}`
+          : `${Number(user.dutyHours ?? 8)}h duty`,
+        dutyStartTime: effectiveDutyStartTime || '',
+        dutyEndTime: effectiveDutyEndTime || '',
         checkInAt: serialized?.checkInAt || null,
         checkOutAt: serialized?.checkOutAt || null,
         checkOutMethod: serialized?.checkOutMethod || null,
@@ -247,7 +282,9 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
         attendanceDurationMs: serialized?.workedDurationMs || 0,
         workedDurationMs: trackedDurationByUser.get(String(user._id)) || 0,
         attendanceState: serialized?.state || 'not_checked_in',
-        status: serialized ? 'present' : 'absent',
+        status: punctuality.status,
+        lateSeverity: punctuality.lateSeverity,
+        lateByMinutes: punctuality.lateByMinutes,
       };
     });
     const present = records.length;
@@ -256,6 +293,10 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
     const automaticCheckouts = records.filter(
       (record) => record.checkOutMethod === 'automatic_midnight'
     ).length;
+    const late = rows.filter((row) => row.status === 'late').length;
+    const graceLate = rows.filter((row) => row.lateSeverity === 'grace').length;
+    const severeLate = rows.filter((row) => row.lateSeverity === 'severe').length;
+    const onTime = rows.filter((row) => row.status === 'present').length;
     const totalWorkedDurationMs = rows.reduce((sum, row) => sum + row.workedDurationMs, 0);
 
     res.json({
@@ -267,6 +308,10 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
         metrics: {
           total: users.length,
           present,
+          onTime,
+          late,
+          graceLate,
+          severeLate,
           absent: Math.max(0, users.length - present),
           checkedIn,
           checkedOut,

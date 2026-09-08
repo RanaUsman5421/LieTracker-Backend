@@ -6,6 +6,9 @@ const attendanceSchema = new mongoose.Schema({
   dateKey: { type: String, required: true, trim: true },
   timezone: { type: String, required: true, trim: true, default: 'Asia/Karachi' },
   checkInAt: { type: Date, required: true },
+  scheduledDutyStartTime: { type: String, trim: true, default: '' },
+  scheduledDutyEndTime: { type: String, trim: true, default: '' },
+  scheduleSnapshotAt: { type: Date, default: null },
   checkInSource: {
     type: String,
     enum: ['tracking_start', 'manual_button'],
