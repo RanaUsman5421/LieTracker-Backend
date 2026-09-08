@@ -1,5 +1,6 @@
 const express = require('express');
 const Screenshot = require('../models/Screenshot');
+const Attendance = require('../models/Attendance');
 const TrackingEntry = require('../models/TrackingEntry');
 const User = require('../models/User');
 const { requireAuthenticatedUser } = require('../middleware/requireAuth');
@@ -122,8 +123,10 @@ function addSegmentActivityMetrics(metrics) {
   const activeDuration = Math.max(0, Number(safeMetrics.activeDuration) || 0);
   const inactiveDuration = Math.max(0, Number(safeMetrics.inactiveDuration) || 0);
   const trackedDuration = activeDuration + inactiveDuration;
+  const pauseDuration = Math.max(0, Number(safeMetrics.pauseDuration) || 0);
+  const connectedDuration = trackedDuration + pauseDuration;
   const activityEvents = Math.max(0, Number(safeMetrics.activityEvents) || 0);
-  const activeTimeScore = trackedDuration > 0 ? (activeDuration / trackedDuration) * 100 : 0;
+  const activeTimeScore = connectedDuration > 0 ? (activeDuration / connectedDuration) * 100 : 0;
   const inputEventScore = Math.min(100, (activityEvents / EXPECTED_EVENTS_PER_SEGMENT) * 100);
   const performanceScore = (activeTimeScore * inputEventScore) / 100;
 
@@ -163,13 +166,22 @@ function buildPresenceSessions({ trackingEntries, screenshots, rangeStart, range
     .filter(Boolean)
     .sort((first, second) => first.startedAt - second.startedAt);
 
-  if (!events.length) {
-    return [];
+  const boundedEvents = events.filter(
+    (event) => event.endedAt >= rangeStart && event.startedAt <= rangeEnd
+  );
+
+  if (!boundedEvents.length) {
+    return rangeStart < rangeEnd ? [{
+      id: 'offline-full-range',
+      status: 'offline',
+      startedAt: rangeStart.toISOString(),
+      endedAt: rangeEnd.toISOString(),
+    }] : [];
   }
 
   const onlineSessions = [];
 
-  events.forEach((event) => {
+  boundedEvents.forEach((event) => {
     const activeSession = onlineSessions[onlineSessions.length - 1];
 
     if (
@@ -203,17 +215,17 @@ function buildPresenceSessions({ trackingEntries, screenshots, rangeStart, range
         const segmentEndedAt = new Date(
           Math.min(segmentStartedAt.getTime() + SCREENSHOT_SEGMENT_MS, endedAt.getTime())
         );
-        const isCompleteSegment =
-          segmentEndedAt.getTime() - segmentStartedAt.getTime() >= SCREENSHOT_SEGMENT_MS &&
-          segmentEndedAt.getTime() <= Date.now();
+        const isCompleteSegment = segmentEndedAt.getTime() <= Date.now();
         const metrics = calculateSegmentMetrics(trackingEntries, segmentStartedAt, segmentEndedAt);
+        const actualSegmentDurationMs = segmentEndedAt.getTime() - segmentStartedAt.getTime();
+        metrics.pauseDuration = Math.max(0, actualSegmentDurationMs - metrics.duration);
 
         sessions.push({
           id: `online-${index + 1}-segment-${segmentIndex}`,
           status: 'online',
           startedAt: segmentStartedAt.toISOString(),
           endedAt: segmentEndedAt.toISOString(),
-          segmentDurationMs: SCREENSHOT_SEGMENT_MS,
+          segmentDurationMs: actualSegmentDurationMs,
           isCompleteSegment,
           metrics: addSegmentActivityMetrics(metrics),
         });
@@ -241,7 +253,31 @@ function buildPresenceSessions({ trackingEntries, screenshots, rangeStart, range
     }
   });
 
-  return sessions;
+  const orderedSessions = sessions.sort(
+    (first, second) => new Date(first.startedAt) - new Date(second.startedAt)
+  );
+  if (!orderedSessions.length) {
+    return [];
+  }
+  const firstStartedAt = new Date(orderedSessions[0].startedAt);
+  if (rangeStart < firstStartedAt) {
+    orderedSessions.unshift({
+      id: 'offline-before-first-session',
+      status: 'offline',
+      startedAt: rangeStart.toISOString(),
+      endedAt: firstStartedAt.toISOString(),
+    });
+  }
+  const lastEndedAt = new Date(orderedSessions[orderedSessions.length - 1].endedAt);
+  if (lastEndedAt < rangeEnd) {
+    orderedSessions.push({
+      id: 'offline-after-last-session',
+      status: 'offline',
+      startedAt: lastEndedAt.toISOString(),
+      endedAt: rangeEnd.toISOString(),
+    });
+  }
+  return orderedSessions;
 }
 
 router.post('/', trackingWriteRateLimit, requireAuthenticatedUser, async (req, res) => {
@@ -426,7 +462,7 @@ router.get('/user/:identifier/presence-sessions', requireDashboardAuthenticatedA
       .select('_id email')
       .lean();
 
-    const [trackingEntries, screenshots] = await Promise.all([
+    const [trackingEntries, screenshots, attendance] = await Promise.all([
       TrackingEntry.find({
         ...userQuery,
         timestamp: { $gte: start, $lt: end },
@@ -444,19 +480,42 @@ router.get('/user/:identifier/presence-sessions', requireDashboardAuthenticatedA
           .sort({ timestamp: 1 })
           .lean()
         : [],
+      matchedUser?._id
+        ? Attendance.findOne({
+          adminId: req.adminId,
+          userId: matchedUser._id,
+          dateKey: date,
+        }).lean()
+        : null,
     ]);
+
+    const now = new Date();
+    const presenceStart = attendance?.checkInAt
+      ? new Date(Math.max(start.getTime(), new Date(attendance.checkInAt).getTime()))
+      : start;
+    const openAttendanceEnd = date === getDayKey(now) ? now : end;
+    const presenceEnd = attendance?.checkOutAt
+      ? new Date(Math.min(end.getTime(), new Date(attendance.checkOutAt).getTime()))
+      : new Date(Math.min(end.getTime(), openAttendanceEnd.getTime()));
 
     res.json({
       success: true,
       data: {
         date,
         offlineAfterMs: ONLINE_WINDOW_MS,
-        sessions: buildPresenceSessions({
-          trackingEntries,
-          screenshots,
-          rangeStart: start,
-          rangeEnd: end,
-        }),
+        sessions: attendance || trackingEntries.length || screenshots.length
+          ? buildPresenceSessions({
+            trackingEntries,
+            screenshots,
+            rangeStart: presenceStart,
+            rangeEnd: presenceEnd,
+          })
+          : [],
+        attendance: attendance ? {
+          checkInAt: attendance.checkInAt,
+          checkOutAt: attendance.checkOutAt,
+          state: attendance.state,
+        } : null,
       },
     });
   } catch (error) {
