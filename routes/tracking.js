@@ -20,7 +20,8 @@ const { getUserPresence, ONLINE_WINDOW_MS } = require('../utils/presence');
 const router = express.Router();
 const SCREENSHOT_SEGMENT_MS = 15 * 60 * 1000;
 const EXPECTED_EVENTS_PER_SEGMENT = 15;
-const MIN_INACTIVE_ROUTE_MS = 2 * 60 * 1000;
+const MIN_INACTIVE_ROUTE_MS = 5 * 60 * 1000;
+const TRACKING_INTERVAL_JITTER_MS = 5 * 1000;
 const trackingWriteRateLimit = createRateLimiter({
   windowMs: 60 * 1000,
   maxRequests: 240,
@@ -143,15 +144,22 @@ function addSegmentActivityMetrics(metrics) {
 function buildPresenceSessions({ trackingEntries, screenshots, rangeStart, rangeEnd }) {
   const events = [
     ...trackingEntries.map((entry) => {
-      const startedAt = normalizeTimelineDate(entry.timestamp);
-      if (!startedAt) {
+      const timestamp = normalizeTimelineDate(entry.timestamp);
+      if (!timestamp) {
         return null;
       }
 
       const duration = Math.max(0, Number(entry.duration) || 0);
+      const endAnchored = Boolean(entry.batchId || entry.clientEntryId);
+      const startedAt = endAnchored
+        ? new Date(timestamp.getTime() - duration)
+        : timestamp;
+      const endedAt = endAnchored
+        ? timestamp
+        : new Date(timestamp.getTime() + duration);
       return {
         startedAt,
-        endedAt: new Date(startedAt.getTime() + duration),
+        endedAt,
       };
     }),
     ...screenshots.map((screenshot) => {
@@ -281,7 +289,25 @@ function buildPresenceSessions({ trackingEntries, screenshots, rangeStart, range
   return orderedSessions;
 }
 
-function buildActivityRoute({ trackingEntries, rangeStart, rangeEnd }) {
+function getScreenshotHeartbeatEnd(screenshots, startMs, rangeEndMs) {
+  let coverageEnd = Math.min(rangeEndMs, startMs + ONLINE_WINDOW_MS);
+  const timestamps = screenshots
+    .map((screenshot) => normalizeTimelineDate(screenshot.timestamp)?.getTime())
+    .filter((timestamp) => Number.isFinite(timestamp))
+    .sort((left, right) => left - right);
+
+  timestamps.forEach((timestamp) => {
+    if (timestamp > coverageEnd || timestamp + ONLINE_WINDOW_MS < startMs) return;
+    coverageEnd = Math.min(
+      rangeEndMs,
+      Math.max(coverageEnd, timestamp + ONLINE_WINDOW_MS),
+    );
+  });
+
+  return coverageEnd;
+}
+
+function buildActivityRoute({ trackingEntries, screenshots = [], rangeStart, rangeEnd }) {
   const groupedEntries = new Map();
 
   trackingEntries.forEach((entry) => {
@@ -329,16 +355,6 @@ function buildActivityRoute({ trackingEntries, rangeStart, rangeEnd }) {
     .sort((left, right) => left.start - right.start);
 
   const route = [];
-  if (!trackedParts.length) {
-    return rangeStart < rangeEnd
-      ? [{
-        id: 'activity-offline-full-range',
-        label: 'Offline',
-        startedAt: rangeStart.toISOString(),
-        endedAt: rangeEnd.toISOString(),
-      }]
-      : [];
-  }
   let cursor = rangeStart.getTime();
   const append = (label, start, end) => {
     if (end <= start) return;
@@ -354,18 +370,30 @@ function buildActivityRoute({ trackingEntries, rangeStart, rangeEnd }) {
     if (part.end <= cursor) return;
     const partStart = Math.max(cursor, part.start);
     if (partStart > cursor) {
-      const graceEnd = Math.min(partStart, cursor + ONLINE_WINDOW_MS);
-      append('Work', cursor, graceEnd);
-      append('Offline', graceEnd, partStart);
+      const previous = route[route.length - 1];
+      if (
+        previous?.label === part.label
+        && partStart - cursor <= TRACKING_INTERVAL_JITTER_MS
+      ) {
+        append(part.label, cursor, partStart);
+      } else {
+        const graceEnd = Math.min(partStart, cursor + ONLINE_WINDOW_MS);
+        append('Work', cursor, graceEnd);
+        append('Offline', graceEnd, partStart);
+      }
     }
     append(part.label, partStart, part.end);
     cursor = Math.max(cursor, part.end);
   });
 
   if (cursor < rangeEnd.getTime()) {
-    const graceEnd = Math.min(rangeEnd.getTime(), cursor + ONLINE_WINDOW_MS);
-    append('Work', cursor, graceEnd);
-    append('Offline', graceEnd, rangeEnd.getTime());
+    const heartbeatEnd = getScreenshotHeartbeatEnd(
+      screenshots,
+      cursor,
+      rangeEnd.getTime(),
+    );
+    append('Work', cursor, heartbeatEnd);
+    append('Offline', heartbeatEnd, rangeEnd.getTime());
   }
 
   const displayRoute = route
@@ -623,9 +651,10 @@ router.get('/user/:identifier/presence-sessions', requireDashboardAuthenticatedA
             rangeEnd: presenceEnd,
           })
           : [],
-        activityRoute: attendance || trackingEntries.length
+        activityRoute: attendance || trackingEntries.length || screenshots.length
           ? buildActivityRoute({
             trackingEntries,
+            screenshots,
             rangeStart: presenceStart,
             rangeEnd: presenceEnd,
           })
