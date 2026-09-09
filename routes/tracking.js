@@ -20,7 +20,6 @@ const { getUserPresence, ONLINE_WINDOW_MS } = require('../utils/presence');
 const router = express.Router();
 const SCREENSHOT_SEGMENT_MS = 15 * 60 * 1000;
 const EXPECTED_EVENTS_PER_SEGMENT = 15;
-const MIN_INACTIVE_ROUTE_MS = 5 * 60 * 1000;
 const TRACKING_INTERVAL_JITTER_MS = 5 * 1000;
 const trackingWriteRateLimit = createRateLimiter({
   windowMs: 60 * 1000,
@@ -396,13 +395,7 @@ function buildActivityRoute({ trackingEntries, screenshots = [], rangeStart, ran
     append('Offline', heartbeatEnd, rangeEnd.getTime());
   }
 
-  const displayRoute = route
-    .map((part) => (
-      part.label === 'Inactive' && part.end - part.start < MIN_INACTIVE_ROUTE_MS
-        ? { ...part, label: 'Work' }
-        : part
-    ))
-    .reduce((merged, part) => {
+  const displayRoute = route.reduce((merged, part) => {
       const previous = merged[merged.length - 1];
       if (previous?.label === part.label && part.start <= previous.end) {
         previous.end = Math.max(previous.end, part.end);
