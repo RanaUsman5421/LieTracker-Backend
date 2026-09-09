@@ -53,6 +53,7 @@ router.get('/summary', async (req, res) => {
   try {
     const summary = await withCachedSummary(`dashboard-summary:${req.adminId}`, async () => {
       const { todayStart, yesterdayStart, weekStart, rangeEnd } = getDateRangeForRecentDays(7);
+      const { rangeStart: analyticsStart } = getDateRangeForRecentDays(56);
       const monthStart = getStartOfMonth(new Date());
       const summaryStart = monthStart < weekStart ? monthStart : weekStart;
       const todayKey = getDayKey(todayStart);
@@ -62,7 +63,7 @@ router.get('/summary', async (req, res) => {
       const summaryStartKey = getDayKey(summaryStart);
       const resolvedActiveDuration = buildResolvedActiveDurationExpression();
       const resolvedInactiveDuration = buildResolvedInactiveDurationExpression();
-      const [trackingSummary, screenshotCounts, hourlyTrackingSummary, breakRecords] = await Promise.all([
+      const [trackingSummary, screenshotCounts, hourlyTrackingSummary, hourlyActivityTrend, dailyActivitySummary, dailyScreenshotSummary, breakRecords] = await Promise.all([
         TrackingEntry.aggregate([
           {
             $match: {
@@ -267,6 +268,118 @@ router.get('/summary', async (req, res) => {
           },
           { $sort: { hour: 1 } },
         ]),
+        TrackingEntry.aggregate([
+          {
+            $match: {
+              adminId: req.adminId,
+              timestamp: {
+                $gte: weekStart,
+                $lt: rangeEnd,
+              },
+            },
+          },
+          {
+            $group: {
+              _id: {
+                dayKey: {
+                  $dateToString: {
+                    format: '%Y-%m-%d',
+                    date: '$timestamp',
+                    timezone: TRACKING_TIME_ZONE,
+                  },
+                },
+                hour: {
+                  $hour: {
+                    date: '$timestamp',
+                    timezone: TRACKING_TIME_ZONE,
+                  },
+                },
+              },
+              activeDuration: { $sum: resolvedActiveDuration },
+              inactiveDuration: { $sum: resolvedInactiveDuration },
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              dayKey: '$_id.dayKey',
+              hour: '$_id.hour',
+              activeDuration: 1,
+              inactiveDuration: 1,
+            },
+          },
+          { $sort: { dayKey: 1, hour: 1 } },
+        ]),
+        TrackingEntry.aggregate([
+          {
+            $match: {
+              adminId: req.adminId,
+              timestamp: {
+                $gte: analyticsStart,
+                $lt: rangeEnd,
+              },
+            },
+          },
+          {
+            $group: {
+              _id: {
+                $dateToString: {
+                  format: '%Y-%m-%d',
+                  date: '$timestamp',
+                  timezone: TRACKING_TIME_ZONE,
+                },
+              },
+              activeDuration: { $sum: resolvedActiveDuration },
+              inactiveDuration: { $sum: resolvedInactiveDuration },
+              keystrokes: { $sum: { $ifNull: ['$keystrokes', 0] } },
+              mouseClicks: { $sum: { $ifNull: ['$mouseClicks', 0] } },
+              mouseMovements: { $sum: { $ifNull: ['$mouseMovements', 0] } },
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              dayKey: '$_id',
+              activeDuration: 1,
+              inactiveDuration: 1,
+              keystrokes: 1,
+              mouseClicks: 1,
+              mouseMovements: 1,
+            },
+          },
+          { $sort: { dayKey: 1 } },
+        ]),
+        Screenshot.aggregate([
+          {
+            $match: {
+              adminId: req.adminId,
+              timestamp: {
+                $gte: weekStart,
+                $lt: rangeEnd,
+              },
+            },
+          },
+          {
+            $group: {
+              _id: {
+                $dateToString: {
+                  format: '%Y-%m-%d',
+                  date: '$timestamp',
+                  timezone: TRACKING_TIME_ZONE,
+                },
+              },
+              count: { $sum: 1 },
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              dayKey: '$_id',
+              count: 1,
+            },
+          },
+          { $sort: { dayKey: 1 } },
+        ]),
         DailyBreak.find({
           adminId: req.adminId,
           dateKey: { $gte: summaryStartKey, $lte: todayKey },
@@ -281,6 +394,9 @@ router.get('/summary', async (req, res) => {
 
       const userSummaryById = new Map(
         trackingSummary.map((entry) => [String(entry.userId || '').trim(), { ...entry }])
+      );
+      const dailyActivityByDayKey = new Map(
+        dailyActivitySummary.map((entry) => [String(entry.dayKey || ''), { ...entry }])
       );
 
       breakRecords.forEach((record) => {
@@ -328,6 +444,14 @@ router.get('/summary', async (req, res) => {
           entry.inactiveThisMonth += overtimeDuration;
         }
         userSummaryById.set(userId, entry);
+
+        const dailyEntry = dailyActivityByDayKey.get(record.dateKey) || {
+          dayKey: record.dateKey,
+          activeDuration: 0,
+          inactiveDuration: 0,
+        };
+        dailyEntry.inactiveDuration += overtimeDuration;
+        dailyActivityByDayKey.set(record.dateKey, dailyEntry);
       });
 
       const userSummary = [...userSummaryById.values()]
@@ -342,6 +466,10 @@ router.get('/summary', async (req, res) => {
         generatedAt: new Date().toISOString(),
         userSummary,
         hourlyActivity: hourlyTrackingSummary,
+        hourlyActivityTrend,
+        dailyActivity: [...dailyActivityByDayKey.values()]
+          .sort((left, right) => left.dayKey.localeCompare(right.dayKey)),
+        dailyScreenshots: dailyScreenshotSummary,
       };
     });
 
