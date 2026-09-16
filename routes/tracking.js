@@ -2,6 +2,7 @@ const express = require('express');
 const Screenshot = require('../models/Screenshot');
 const Attendance = require('../models/Attendance');
 const TrackingEntry = require('../models/TrackingEntry');
+const { aggregateTrackingEntries, insertTrackingEntries } = require('../services/trackingStorage');
 const User = require('../models/User');
 const { requireAuthenticatedUser } = require('../middleware/requireAuth');
 const { requireDashboardAuthenticatedAdmin } = require('../middleware/requireDashboardAuth');
@@ -490,21 +491,7 @@ router.post('/', trackingWriteRateLimit, requireAuthenticatedUser, async (req, r
       };
     });
 
-    const operations = mappedEntries.map((entry) => entry.clientEntryId
-      ? {
-        updateOne: {
-          filter: {
-            userId: entry.userId,
-            deviceId: entry.deviceId,
-            clientEntryId: entry.clientEntryId,
-          },
-          update: { $setOnInsert: entry },
-          upsert: true,
-        },
-      }
-      : { insertOne: { document: entry } });
-    const writeResult = await TrackingEntry.bulkWrite(operations, { ordered: false });
-    const inserted = (writeResult.insertedCount || 0) + (writeResult.upsertedCount || 0);
+    const inserted = await insertTrackingEntries(mappedEntries);
     const duplicates = mappedEntries.length - inserted;
     if (inserted > 0) {
       clearSummaryCache();
@@ -527,12 +514,16 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
       maxLimit: 1000,
     });
     const [entries, total] = await Promise.all([
-      TrackingEntry.find({ adminId: req.adminId })
-        .sort({ timestamp: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
-      TrackingEntry.countDocuments({ adminId: req.adminId }),
+      aggregateTrackingEntries([
+        { $match: { adminId: req.adminId } },
+        { $sort: { timestamp: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+      ]),
+      aggregateTrackingEntries([
+        { $match: { adminId: req.adminId } },
+        { $count: 'total' },
+      ]).then((counts) => counts[0]?.total || 0),
     ]);
     res.json({
       success: true,
@@ -559,12 +550,16 @@ router.get('/user/:identifier', requireDashboardAuthenticatedAdmin, async (req, 
     });
     const userQuery = buildUserScopedQuery(req.params.identifier, req.adminId);
     const [entries, total] = await Promise.all([
-      TrackingEntry.find(userQuery)
-        .sort({ timestamp: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
-      TrackingEntry.countDocuments(userQuery),
+      aggregateTrackingEntries([
+        { $match: userQuery },
+        { $sort: { timestamp: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+      ]),
+      aggregateTrackingEntries([
+        { $match: userQuery },
+        { $count: 'total' },
+      ]).then((counts) => counts[0]?.total || 0),
     ]);
     res.json({
       success: true,
@@ -596,13 +591,15 @@ router.get('/user/:identifier/presence-sessions', requireDashboardAuthenticatedA
       .lean();
 
     const [trackingEntries, screenshots, attendance] = await Promise.all([
-      TrackingEntry.find({
-        ...userQuery,
-        timestamp: { $gte: start, $lt: end },
-      })
-        .select('timestamp duration activeDuration inactiveDuration classification keystrokes mouseClicks mouseMovements activityEvents batchId clientEntryId sessionId')
-        .sort({ timestamp: 1 })
-        .lean(),
+      aggregateTrackingEntries([
+        { $match: { ...userQuery, timestamp: { $gte: start, $lt: end } } },
+        { $project: {
+          timestamp: 1, duration: 1, activeDuration: 1, inactiveDuration: 1,
+          classification: 1, keystrokes: 1, mouseClicks: 1, mouseMovements: 1,
+          activityEvents: 1, batchId: 1, clientEntryId: 1, sessionId: 1,
+        } },
+        { $sort: { timestamp: 1 } },
+      ]),
       matchedUser?._id
         ? Screenshot.find({
           adminId: req.adminId,
@@ -774,7 +771,7 @@ router.get('/user/:identifier/summary', requireDashboardAuthenticatedAdmin, asyn
         }))
           .select('_id email username createdAt lastSeenAt lastScreenshotAt')
           .lean(),
-        TrackingEntry.aggregate([
+        aggregateTrackingEntries([
           {
             $match: {
               adminId: req.adminId,
@@ -818,10 +815,12 @@ router.get('/user/:identifier/summary', requireDashboardAuthenticatedAdmin, asyn
           },
           { $sort: { dayKey: 1 } },
         ]),
-        TrackingEntry.findOne(userQuery)
-          .sort({ timestamp: -1 })
-          .select('timestamp classification')
-          .lean(),
+        aggregateTrackingEntries([
+          { $match: userQuery },
+          { $sort: { timestamp: -1 } },
+          { $limit: 1 },
+          { $project: { timestamp: 1, classification: 1 } },
+        ]).then((items) => items[0] || null),
       ]);
 
       const screenshotCounts = matchedUser?._id
@@ -905,7 +904,7 @@ router.get('/user/:identifier/activity', requireDashboardAuthenticatedAdmin, asy
       };
 
       const [applications, internetUsage] = await Promise.all([
-        TrackingEntry.aggregate([
+        aggregateTrackingEntries([
           { $match: matchStage },
           {
             $group: {
@@ -923,7 +922,7 @@ router.get('/user/:identifier/activity', requireDashboardAuthenticatedAdmin, asy
             },
           },
         ]),
-        TrackingEntry.aggregate([
+        aggregateTrackingEntries([
           {
             $match: {
               ...matchStage,
@@ -969,7 +968,7 @@ router.get('/summary', requireDashboardAuthenticatedAdmin, async (req, res) => {
       const resolvedActiveDuration = buildResolvedActiveDurationExpression();
       const resolvedInactiveDuration = buildResolvedInactiveDurationExpression();
 
-      const userSummary = await TrackingEntry.aggregate([
+      const userSummary = await aggregateTrackingEntries([
         {
           $match: {
             adminId: req.adminId,
@@ -1005,7 +1004,7 @@ router.get('/summary', requireDashboardAuthenticatedAdmin, async (req, res) => {
         { $sort: { totalDuration: -1 } },
       ]);
 
-      const appSummary = await TrackingEntry.aggregate([
+      const appSummary = await aggregateTrackingEntries([
         {
           $match: {
             adminId: req.adminId,

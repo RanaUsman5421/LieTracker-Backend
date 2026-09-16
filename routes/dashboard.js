@@ -1,7 +1,7 @@
 const express = require('express');
 const DailyBreak = require('../models/DailyBreak');
 const Screenshot = require('../models/Screenshot');
-const TrackingEntry = require('../models/TrackingEntry');
+const { aggregateTrackingEntries } = require('../services/trackingStorage');
 const { requireDashboardAuthenticatedAdmin } = require('../middleware/requireDashboardAuth');
 const { withCachedSummary } = require('../services/summaryCache');
 const {
@@ -64,7 +64,7 @@ router.get('/summary', async (req, res) => {
       const resolvedActiveDuration = buildResolvedActiveDurationExpression();
       const resolvedInactiveDuration = buildResolvedInactiveDurationExpression();
       const [trackingSummary, screenshotCounts, hourlyTrackingSummary, hourlyActivityTrend, dailyActivitySummary, dailyScreenshotSummary, breakRecords] = await Promise.all([
-        TrackingEntry.aggregate([
+        aggregateTrackingEntries([
           {
             $match: {
               adminId: req.adminId,
@@ -234,7 +234,7 @@ router.get('/summary', async (req, res) => {
             },
           },
         ]),
-        TrackingEntry.aggregate([
+        aggregateTrackingEntries([
           {
             $match: {
               adminId: req.adminId,
@@ -268,7 +268,7 @@ router.get('/summary', async (req, res) => {
           },
           { $sort: { hour: 1 } },
         ]),
-        TrackingEntry.aggregate([
+        aggregateTrackingEntries([
           {
             $match: {
               adminId: req.adminId,
@@ -310,7 +310,7 @@ router.get('/summary', async (req, res) => {
           },
           { $sort: { dayKey: 1, hour: 1 } },
         ]),
-        TrackingEntry.aggregate([
+        aggregateTrackingEntries([
           {
             $match: {
               adminId: req.adminId,

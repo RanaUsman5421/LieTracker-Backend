@@ -210,6 +210,21 @@ Get aggregated tracking statistics by user and application.
 - `createdAt`: Date (default: now)
 
 ### TrackingEntry
+
+Desktop tracking uploads with a `clientEntryId` are stored in `TrackingBucket`
+documents, one per user/device/UTC minute. Each bucket retains the original
+5-second samples (timestamps, app, classification, counters, batch and client
+IDs). Dashboard and report queries expand these samples and union them with
+older standalone `TrackingEntry` documents, so response shapes and calculations
+remain unchanged. Manual entries and legacy uploads without `clientEntryId`
+continue to use `TrackingEntry`.
+
+This change only reduces **new** standalone document growth. Existing
+`TrackingEntry` documents are deliberately not deleted or migrated during
+startup. Measure collection and index sizes before planning an offline,
+verified historical migration. Deploy the updated backend as a unit; rolling
+back to code that reads only `TrackingEntry` would hide bucketed uploads from
+dashboard reports until the updated backend is restored.
 - `app`: String (required)
 - `title`: String (required)
 - `duration`: Number (milliseconds, min 0)

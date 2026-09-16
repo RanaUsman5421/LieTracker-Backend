@@ -1,7 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const Attendance = require('../models/Attendance');
-const TrackingEntry = require('../models/TrackingEntry');
+const { aggregateTrackingEntries } = require('../services/trackingStorage');
 const User = require('../models/User');
 const { requireAuthenticatedUser } = require('../middleware/requireAuth');
 const { requireDashboardAuthenticatedAdmin } = require('../middleware/requireDashboardAuth');
@@ -234,7 +234,7 @@ router.get('/', requireDashboardAuthenticatedAdmin, async (req, res) => {
         adminId: req.adminId,
         dateKey: { $gte: `${requestedYear}-01-01`, $lte: `${requestedYear}-12-31` },
       }).lean(),
-      TrackingEntry.aggregate([
+      aggregateTrackingEntries([
         { $match: { adminId: req.adminId, timestamp: { $gte: start, $lt: end } } },
         { $group: { _id: '$userId', durationMs: { $sum: { $ifNull: ['$duration', 0] } } } },
       ]),

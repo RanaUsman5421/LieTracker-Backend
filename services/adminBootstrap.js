@@ -1,6 +1,8 @@
 const Admin = require('../models/Admin');
 const Screenshot = require('../models/Screenshot');
 const TrackingEntry = require('../models/TrackingEntry');
+const TrackingBucket = require('../models/TrackingBucket');
+const { aggregateTrackingEntries } = require('./trackingStorage');
 const User = require('../models/User');
 const {
   DASHBOARD_ADMIN_PASSWORD,
@@ -72,7 +74,7 @@ async function backfillTopCloudinaryAssignments(adminId, limit = 15) {
     return;
   }
 
-  const rankedUsers = await TrackingEntry.aggregate([
+  const rankedUsers = await aggregateTrackingEntries([
     {
       $match: {
         adminId,
@@ -147,6 +149,8 @@ async function backfillExistingDataToDefaultAdmin() {
   };
 
   const users = await User.updateMany(missingAdminQuery, { $set: { adminId: admin._id } });
+  // Dashboard unions must have a real bucket collection before HTTP starts.
+  await TrackingBucket.createIndexes();
 
   await dropLegacyUserUniqueIndexes();
 
@@ -157,8 +161,9 @@ async function backfillExistingDataToDefaultAdmin() {
 
   setImmediate(async () => {
     try {
-      const [trackingEntries, screenshots] = await Promise.all([
+      const [trackingEntries, trackingBuckets, screenshots] = await Promise.all([
         TrackingEntry.updateMany(missingAdminQuery, { $set: { adminId: admin._id } }),
+        TrackingBucket.updateMany(missingAdminQuery, { $set: { adminId: admin._id } }),
         Screenshot.updateMany(missingAdminQuery, { $set: { adminId: admin._id } }),
       ]);
 
@@ -166,12 +171,14 @@ async function backfillExistingDataToDefaultAdmin() {
         Admin.createIndexes(),
         User.createIndexes(),
         TrackingEntry.createIndexes(),
+        TrackingBucket.createIndexes(),
         Screenshot.createIndexes(),
       ]);
 
       console.log('[Backend] Admin tracking/screenshot backfill complete', {
         adminId: String(admin._id),
         trackingEntries: trackingEntries.modifiedCount || 0,
+        trackingBuckets: trackingBuckets.modifiedCount || 0,
         screenshots: screenshots.modifiedCount || 0,
       });
     } catch (error) {

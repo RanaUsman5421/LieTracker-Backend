@@ -1,4 +1,4 @@
-const TrackingEntry = require('../../models/TrackingEntry');
+const { aggregateTrackingEntries } = require('../../services/trackingStorage');
 const User = require('../../models/User');
 const { PerformanceCalculator } = require('../performance/PerformanceCalculator');
 const {
@@ -158,13 +158,13 @@ async function getUserPeriodSummaryWithOptions(identifier, options = {}) {
     User.findOne(lookupQuery)
       .select('_id username email department designation createdAt lastSeenAt lastScreenshotAt')
       .lean(),
-    TrackingEntry.aggregate([
+    aggregateTrackingEntries([
       {
         $facet: buildPeriodFacet(userQuery, ranges),
       },
     ]),
     detailRange
-      ? TrackingEntry.aggregate([
+      ? aggregateTrackingEntries([
         { $match: buildRangeMatch(userQuery, detailRange) },
         {
           $group: {
@@ -193,7 +193,7 @@ async function getUserPeriodSummaryWithOptions(identifier, options = {}) {
       ])
       : [],
     detailRange
-      ? TrackingEntry.aggregate([
+      ? aggregateTrackingEntries([
         { $match: buildRangeMatch(userQuery, detailRange) },
         {
           $group: {
