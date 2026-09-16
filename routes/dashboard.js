@@ -10,6 +10,7 @@ const {
   getDateRangeForRecentDays,
   getDayKey,
   getStartOfMonth,
+  getStartOfWeek,
   parseDayKey,
 } = require('../utils/date');
 const {
@@ -21,6 +22,73 @@ const {
 const router = express.Router();
 
 router.use(requireDashboardAuthenticatedAdmin);
+
+// A single, user-grouped query keeps Timeline independent from the more
+// expensive charts and screenshot aggregations in /summary.
+router.get('/timeline', async (req, res) => {
+  try {
+    const now = new Date();
+    const { todayStart, yesterdayStart, rangeEnd } = getDateRangeForRecentDays(7);
+    const weekStart = getStartOfWeek(now);
+    const monthStart = getStartOfMonth(now);
+    const rangeStart = new Date(Math.min(yesterdayStart.getTime(), weekStart.getTime(), monthStart.getTime()));
+    const active = buildResolvedActiveDurationExpression();
+    const inactive = buildResolvedInactiveDurationExpression();
+    const sumSince = (start, expression, end = rangeEnd) => ({
+      $sum: { $cond: [{ $and: [{ $gte: ['$timestamp', start] }, { $lt: ['$timestamp', end] }] }, expression, 0] },
+    });
+    const [entries, breakRecords, screenshotCounts] = await Promise.all([
+      aggregateTrackingEntries([
+        { $match: { adminId: req.adminId, timestamp: { $gte: rangeStart, $lt: rangeEnd } } },
+        { $group: {
+          _id: buildUserAggregationKey(),
+          activeToday: sumSince(todayStart, active),
+          inactiveToday: sumSince(todayStart, inactive),
+          activeYesterday: sumSince(yesterdayStart, active, todayStart),
+          inactiveYesterday: sumSince(yesterdayStart, inactive, todayStart),
+          activeThisWeek: sumSince(weekStart, active),
+          inactiveThisWeek: sumSince(weekStart, inactive),
+          activeThisMonth: sumSince(monthStart, active),
+          inactiveThisMonth: sumSince(monthStart, inactive),
+        } },
+        { $project: { _id: 0, userId: '$_id.userId', userEmail: '$_id.userEmail',
+          activeToday: 1, inactiveToday: 1, activeYesterday: 1, inactiveYesterday: 1,
+          activeThisWeek: 1, inactiveThisWeek: 1, activeThisMonth: 1, inactiveThisMonth: 1 } },
+      ]),
+      DailyBreak.find({
+        adminId: req.adminId,
+        dateKey: { $gte: getDayKey(rangeStart), $lte: getDayKey(todayStart) },
+      }).select('userId dateKey allowanceMs activeStartedAt sessions').lean(),
+      Screenshot.aggregate([
+        { $match: { adminId: req.adminId, timestamp: { $gte: todayStart, $lt: rangeEnd } } },
+        { $group: { _id: '$userId', count: { $sum: 1 } } },
+      ]),
+    ]);
+    const byId = new Map(entries.filter((entry) => entry.userId).map((entry) => [String(entry.userId), entry]));
+    const todayKey = getDayKey(todayStart);
+    const yesterdayKey = getDayKey(yesterdayStart);
+    const weekKey = getDayKey(weekStart);
+    const monthKey = getDayKey(monthStart);
+    for (const record of breakRecords) {
+      const duration = getBreakOvertimeDuration(record, now);
+      const id = String(record.userId || '');
+      if (!id || !duration) continue;
+      const entry = byId.get(id) || { userId: record.userId };
+      if (record.dateKey === todayKey) entry.inactiveToday = (entry.inactiveToday || 0) + duration;
+      if (record.dateKey === yesterdayKey) entry.inactiveYesterday = (entry.inactiveYesterday || 0) + duration;
+      if (record.dateKey >= weekKey) entry.inactiveThisWeek = (entry.inactiveThisWeek || 0) + duration;
+      if (record.dateKey >= monthKey) entry.inactiveThisMonth = (entry.inactiveThisMonth || 0) + duration;
+      byId.set(id, entry);
+    }
+    const screenshotCountById = new Map(screenshotCounts.map((item) => [String(item._id), item.count]));
+    const userSummary = [...entries.filter((entry) => !entry.userId), ...byId.values()]
+      .map((entry) => ({ ...entry, screenshotCountToday: screenshotCountById.get(String(entry.userId)) || 0 }));
+    res.json({ success: true, data: { generatedAt: now.toISOString(), userSummary } });
+  } catch (error) {
+    console.error('[Backend] Get timeline summary error:', error);
+    res.status(500).json({ success: false, message: 'Unable to fetch timeline performance' });
+  }
+});
 
 function getBreakOvertimeDuration(record, now = new Date()) {
   const closed = (record.sessions || []).reduce((totals, session) => ({
