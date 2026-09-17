@@ -40,11 +40,10 @@ router.get('/timeline', async (req, res) => {
     const [entries, breakRecords, screenshotCounts] = await Promise.all([
       aggregateTrackingEntries([
         { $match: { adminId: req.adminId, timestamp: { $gte: rangeStart, $lt: rangeEnd } } },
-        { $sort: { timestamp: -1 } },
         { $group: {
           _id: buildUserAggregationKey(),
-          latestTimestamp: { $first: '$timestamp' },
-          latestClassification: { $first: '$classification' },
+          latestTimestamp: { $max: '$timestamp' },
+          latestClassification: { $top: { sortBy: { timestamp: -1 }, output: '$classification' } },
           activeToday: sumSince(todayStart, active),
           inactiveToday: sumSince(todayStart, inactive),
           keystrokesToday: sumSince(todayStart, { $ifNull: ['$keystrokes', 0] }),
@@ -154,12 +153,11 @@ router.get('/summary', async (req, res) => {
               },
             },
           },
-          { $sort: { timestamp: -1 } },
           {
             $group: {
               _id: buildUserAggregationKey(),
-              latestTimestamp: { $first: '$timestamp' },
-              latestClassification: { $first: '$classification' },
+              latestTimestamp: { $max: '$timestamp' },
+              latestClassification: { $top: { sortBy: { timestamp: -1 }, output: '$classification' } },
               today: {
                 $sum: {
                   $cond: [{ $gte: ['$timestamp', todayStart] }, { $ifNull: ['$duration', 0] }, 0],
