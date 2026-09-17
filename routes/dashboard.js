@@ -40,10 +40,15 @@ router.get('/timeline', async (req, res) => {
     const [entries, breakRecords, screenshotCounts] = await Promise.all([
       aggregateTrackingEntries([
         { $match: { adminId: req.adminId, timestamp: { $gte: rangeStart, $lt: rangeEnd } } },
+        { $sort: { timestamp: -1 } },
         { $group: {
           _id: buildUserAggregationKey(),
+          latestTimestamp: { $first: '$timestamp' },
+          latestClassification: { $first: '$classification' },
           activeToday: sumSince(todayStart, active),
           inactiveToday: sumSince(todayStart, inactive),
+          keystrokesToday: sumSince(todayStart, { $ifNull: ['$keystrokes', 0] }),
+          mouseClicksToday: sumSince(todayStart, { $ifNull: ['$mouseClicks', 0] }),
           activeYesterday: sumSince(yesterdayStart, active, todayStart),
           inactiveYesterday: sumSince(yesterdayStart, inactive, todayStart),
           activeThisWeek: sumSince(weekStart, active),
@@ -52,7 +57,9 @@ router.get('/timeline', async (req, res) => {
           inactiveThisMonth: sumSince(monthStart, inactive),
         } },
         { $project: { _id: 0, userId: '$_id.userId', userEmail: '$_id.userEmail',
+          latestTimestamp: 1, latestClassification: 1,
           activeToday: 1, inactiveToday: 1, activeYesterday: 1, inactiveYesterday: 1,
+          keystrokesToday: 1, mouseClicksToday: 1,
           activeThisWeek: 1, inactiveThisWeek: 1, activeThisMonth: 1, inactiveThisMonth: 1 } },
       ]),
       DailyBreak.find({
@@ -72,8 +79,13 @@ router.get('/timeline', async (req, res) => {
     for (const record of breakRecords) {
       const duration = getBreakOvertimeDuration(record, now);
       const id = String(record.userId || '');
-      if (!id || !duration) continue;
+      if (!id) continue;
       const entry = byId.get(id) || { userId: record.userId };
+      if (record.dateKey === todayKey && record.activeStartedAt) entry.onBreak = true;
+      if (!duration) {
+        byId.set(id, entry);
+        continue;
+      }
       if (record.dateKey === todayKey) entry.inactiveToday = (entry.inactiveToday || 0) + duration;
       if (record.dateKey === yesterdayKey) entry.inactiveYesterday = (entry.inactiveYesterday || 0) + duration;
       if (record.dateKey >= weekKey) entry.inactiveThisWeek = (entry.inactiveThisWeek || 0) + duration;
