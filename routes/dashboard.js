@@ -44,6 +44,7 @@ router.get('/timeline', async (req, res) => {
           _id: buildUserAggregationKey(),
           latestTimestamp: { $max: '$timestamp' },
           latestClassification: { $top: { sortBy: { timestamp: -1 }, output: '$classification' } },
+          latestApp: { $top: { sortBy: { timestamp: -1 }, output: '$app' } },
           activeToday: sumSince(todayStart, active),
           inactiveToday: sumSince(todayStart, inactive),
           keystrokesToday: sumSince(todayStart, { $ifNull: ['$keystrokes', 0] }),
@@ -56,7 +57,7 @@ router.get('/timeline', async (req, res) => {
           inactiveThisMonth: sumSince(monthStart, inactive),
         } },
         { $project: { _id: 0, userId: '$_id.userId', userEmail: '$_id.userEmail',
-          latestTimestamp: 1, latestClassification: 1,
+          latestTimestamp: 1, latestClassification: 1, latestApp: 1,
           activeToday: 1, inactiveToday: 1, activeYesterday: 1, inactiveYesterday: 1,
           keystrokesToday: 1, mouseClicksToday: 1,
           activeThisWeek: 1, inactiveThisWeek: 1, activeThisMonth: 1, inactiveThisMonth: 1 } },
@@ -128,6 +129,194 @@ function getBreakOvertimeDuration(record, now = new Date()) {
   return closed.overtimeDurationMs + Math.max(0, activeDurationMs - remainingAllowanceMs);
 }
 
+router.get('/range-summary', async (req, res) => {
+  try {
+    const startKey = String(req.query.startDate || '');
+    const endKey = String(req.query.endDate || '');
+    const rangeStart = parseDayKey(startKey);
+    const rangeEndDay = parseDayKey(endKey);
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(startKey) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(endKey) ||
+      !rangeStart ||
+      !rangeEndDay ||
+      getDayKey(rangeStart) !== startKey ||
+      getDayKey(rangeEndDay) !== endKey ||
+      rangeStart > rangeEndDay
+    ) {
+      return res.status(400).json({ success: false, message: 'A valid dashboard date range is required' });
+    }
+    const rangeEnd = addDays(rangeEndDay, 1);
+    const rangeDays = Math.round((rangeEnd.getTime() - rangeStart.getTime()) / (24 * 60 * 60 * 1000));
+    if (rangeDays > 100) {
+      return res.status(400).json({ success: false, message: 'Dashboard range cannot exceed 100 days' });
+    }
+
+    const summary = await withCachedSummary(
+      `dashboard-range:${req.adminId}:${startKey}:${endKey}`,
+      async () => {
+        const active = buildResolvedActiveDurationExpression();
+        const inactive = buildResolvedInactiveDurationExpression();
+        const match = {
+          adminId: req.adminId,
+          timestamp: { $gte: rangeStart, $lt: rangeEnd },
+        };
+        const [entries, screenshotCounts, dailyActivity, hourlyActivityTrend, dailyScreenshots, appSummary, breakRecords] = await Promise.all([
+          aggregateTrackingEntries([
+            { $match: match },
+            {
+              $group: {
+                _id: buildUserAggregationKey(),
+                latestTimestamp: { $max: '$timestamp' },
+                latestClassification: { $top: { sortBy: { timestamp: -1 }, output: '$classification' } },
+                latestApp: { $top: { sortBy: { timestamp: -1 }, output: '$app' } },
+                activeDuration: { $sum: active },
+                inactiveDuration: { $sum: inactive },
+                keystrokes: { $sum: { $ifNull: ['$keystrokes', 0] } },
+                mouseClicks: { $sum: { $ifNull: ['$mouseClicks', 0] } },
+                activityEvents: { $sum: { $ifNull: ['$activityEvents', 0] } },
+              },
+            },
+            {
+              $project: {
+                _id: 0,
+                userId: '$_id.userId',
+                userEmail: '$_id.userEmail',
+                latestTimestamp: 1,
+                latestClassification: 1,
+                latestApp: 1,
+                activeDuration: 1,
+                inactiveDuration: 1,
+                keystrokes: 1,
+                mouseClicks: 1,
+                activityEvents: 1,
+              },
+            },
+          ]),
+          Screenshot.aggregate([
+            { $match: match },
+            { $group: { _id: '$userId', count: { $sum: 1 } } },
+          ]),
+          aggregateTrackingEntries([
+            { $match: match },
+            {
+              $group: {
+                _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp', timezone: TRACKING_TIME_ZONE } },
+                activeDuration: { $sum: active },
+                inactiveDuration: { $sum: inactive },
+                keystrokes: { $sum: { $ifNull: ['$keystrokes', 0] } },
+                mouseClicks: { $sum: { $ifNull: ['$mouseClicks', 0] } },
+                mouseMovements: { $sum: { $ifNull: ['$mouseMovements', 0] } },
+              },
+            },
+            { $project: { _id: 0, dayKey: '$_id', activeDuration: 1, inactiveDuration: 1, keystrokes: 1, mouseClicks: 1, mouseMovements: 1 } },
+            { $sort: { dayKey: 1 } },
+          ]),
+          aggregateTrackingEntries([
+            { $match: match },
+            {
+              $group: {
+                _id: {
+                  dayKey: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp', timezone: TRACKING_TIME_ZONE } },
+                  hour: { $hour: { date: '$timestamp', timezone: TRACKING_TIME_ZONE } },
+                },
+                activeDuration: { $sum: active },
+                inactiveDuration: { $sum: inactive },
+              },
+            },
+            { $project: { _id: 0, dayKey: '$_id.dayKey', hour: '$_id.hour', activeDuration: 1, inactiveDuration: 1 } },
+            { $sort: { dayKey: 1, hour: 1 } },
+          ]),
+          Screenshot.aggregate([
+            { $match: match },
+            {
+              $group: {
+                _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp', timezone: TRACKING_TIME_ZONE } },
+                count: { $sum: 1 },
+              },
+            },
+            { $project: { _id: 0, dayKey: '$_id', count: 1 } },
+            { $sort: { dayKey: 1 } },
+          ]),
+          aggregateTrackingEntries([
+            { $match: match },
+            {
+              $group: {
+                _id: '$app',
+                totalDuration: { $sum: { $add: [active, inactive] } },
+                activeDuration: { $sum: active },
+                inactiveDuration: { $sum: inactive },
+                entries: { $sum: 1 },
+              },
+            },
+            { $project: { _id: 0, app: '$_id', totalDuration: 1, activeDuration: 1, inactiveDuration: 1, entries: 1 } },
+            { $sort: { totalDuration: -1 } },
+          ]),
+          DailyBreak.find({
+            adminId: req.adminId,
+            dateKey: { $gte: startKey, $lte: endKey },
+          }).select('userId dateKey allowanceMs activeStartedAt sessions').lean(),
+        ]);
+
+        const screenshotByUser = new Map(screenshotCounts.map((item) => [String(item._id || ''), Number(item.count) || 0]));
+        const byUser = new Map(entries.map((entry) => [String(entry.userId || entry.userEmail || ''), { ...entry }]));
+        const byDay = new Map(dailyActivity.map((entry) => [entry.dayKey, { ...entry }]));
+        for (const record of breakRecords) {
+          const duration = getBreakOvertimeDuration(record);
+          if (!duration) continue;
+          const userKey = String(record.userId || '');
+          const entry = byUser.get(userKey) || { userId: record.userId, activeDuration: 0, inactiveDuration: 0, keystrokes: 0, mouseClicks: 0, activityEvents: 0 };
+          entry.inactiveDuration = (Number(entry.inactiveDuration) || 0) + duration;
+          if (record.dateKey === getDayKey(new Date()) && record.activeStartedAt) entry.onBreak = true;
+          byUser.set(userKey, entry);
+          const day = byDay.get(record.dateKey) || { dayKey: record.dateKey, activeDuration: 0, inactiveDuration: 0, keystrokes: 0, mouseClicks: 0, mouseMovements: 0 };
+          day.inactiveDuration = (Number(day.inactiveDuration) || 0) + duration;
+          byDay.set(record.dateKey, day);
+        }
+
+        const userSummary = [...byUser.values()].map((entry) => {
+          const activeDuration = Number(entry.activeDuration) || 0;
+          const inactiveDuration = Number(entry.inactiveDuration) || 0;
+          const totalDuration = activeDuration + inactiveDuration;
+          return {
+            ...entry,
+            today: totalDuration,
+            yesterday: totalDuration,
+            last7Days: totalDuration,
+            thisMonth: totalDuration,
+            activeToday: activeDuration,
+            inactiveToday: inactiveDuration,
+            activeYesterday: activeDuration,
+            inactiveYesterday: inactiveDuration,
+            activeLast7Days: activeDuration,
+            inactiveLast7Days: inactiveDuration,
+            activeThisMonth: activeDuration,
+            inactiveThisMonth: inactiveDuration,
+            keystrokesToday: Number(entry.keystrokes) || 0,
+            mouseClicksToday: Number(entry.mouseClicks) || 0,
+            activityEventsToday: Number(entry.activityEvents) || 0,
+            screenshotCountToday: screenshotByUser.get(String(entry.userId || '')) || 0,
+          };
+        });
+
+        return {
+          generatedAt: new Date().toISOString(),
+          range: { startDate: startKey, endDate: endKey },
+          userSummary,
+          dailyActivity: [...byDay.values()].sort((left, right) => left.dayKey.localeCompare(right.dayKey)),
+          hourlyActivityTrend,
+          dailyScreenshots,
+          appSummary,
+        };
+      },
+    );
+    return res.json({ success: true, data: summary });
+  } catch (error) {
+    console.error('[Backend] Get dashboard range summary error:', error);
+    return res.status(500).json({ success: false, message: 'Unable to fetch dashboard range summary' });
+  }
+});
+
 router.get('/summary', async (req, res) => {
   try {
     const summary = await withCachedSummary(`dashboard-summary:${req.adminId}`, async () => {
@@ -158,6 +347,7 @@ router.get('/summary', async (req, res) => {
               _id: buildUserAggregationKey(),
               latestTimestamp: { $max: '$timestamp' },
               latestClassification: { $top: { sortBy: { timestamp: -1 }, output: '$classification' } },
+              latestApp: { $top: { sortBy: { timestamp: -1 }, output: '$app' } },
               today: {
                 $sum: {
                   $cond: [{ $gte: ['$timestamp', todayStart] }, { $ifNull: ['$duration', 0] }, 0],
@@ -269,6 +459,7 @@ router.get('/summary', async (req, res) => {
               userEmail: '$_id.userEmail',
               latestTimestamp: 1,
               latestClassification: 1,
+              latestApp: 1,
               today: 1,
               yesterday: 1,
               last7Days: 1,
