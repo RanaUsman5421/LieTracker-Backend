@@ -45,10 +45,20 @@ app.use('/api/attendance', attendanceRouter);
 app.use('/api/breaks', breaksRouter);
 app.use('/updates', updatesRouter);
 
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    success: true,
+    status: 'ok',
+    message: 'LieTracker backend is working',
+    uptimeSeconds: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+});
+
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'Monitask backend is running',
+    message: 'LieTracker backend is running',
     environment: process.env.NODE_ENV || 'development',
   });
 });
