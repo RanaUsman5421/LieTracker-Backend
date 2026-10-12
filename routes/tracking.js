@@ -4,6 +4,8 @@ const Attendance = require('../models/Attendance');
 const TrackingEntry = require('../models/TrackingEntry');
 const { aggregateTrackingEntries, insertTrackingEntries } = require('../services/trackingStorage');
 const User = require('../models/User');
+const mongoose = require('mongoose');
+const { parseManualRange } = require('../utils/manualTime');
 const { requireAuthenticatedUser } = require('../middleware/requireAuth');
 const { requireDashboardAuthenticatedAdmin } = require('../middleware/requireDashboardAuth');
 const { createRateLimiter } = require('../middleware/rateLimit');
@@ -289,25 +291,10 @@ function buildPresenceSessions({ trackingEntries, screenshots, rangeStart, range
   return orderedSessions;
 }
 
-function getScreenshotHeartbeatEnd(screenshots, startMs, rangeEndMs) {
-  let coverageEnd = Math.min(rangeEndMs, startMs + ONLINE_WINDOW_MS);
-  const timestamps = screenshots
-    .map((screenshot) => normalizeTimelineDate(screenshot.timestamp)?.getTime())
-    .filter((timestamp) => Number.isFinite(timestamp))
-    .sort((left, right) => left - right);
-
-  timestamps.forEach((timestamp) => {
-    if (timestamp > coverageEnd || timestamp + ONLINE_WINDOW_MS < startMs) return;
-    coverageEnd = Math.min(
-      rangeEndMs,
-      Math.max(coverageEnd, timestamp + ONLINE_WINDOW_MS),
-    );
-  });
-
-  return coverageEnd;
-}
-
-function buildActivityRoute({ trackingEntries, screenshots = [], rangeStart, rangeEnd }) {
+function buildActivityRoute({ trackingEntries, rangeStart, rangeEnd }) {
+  const manualEntries = trackingEntries.filter((entry) => entry.sessionId === 'manual-entry')
+    .sort((left, right) => String(left._id).localeCompare(String(right._id)));
+  trackingEntries = trackingEntries.filter((entry) => entry.sessionId !== 'manual-entry');
   const groupedEntries = new Map();
 
   trackingEntries.forEach((entry) => {
@@ -377,9 +364,7 @@ function buildActivityRoute({ trackingEntries, screenshots = [], rangeStart, ran
       ) {
         append(part.label, cursor, partStart);
       } else {
-        const graceEnd = Math.min(partStart, cursor + ONLINE_WINDOW_MS);
-        append('Work', cursor, graceEnd);
-        append('Offline', graceEnd, partStart);
+        append('Offline', cursor, partStart);
       }
     }
     append(part.label, partStart, part.end);
@@ -387,13 +372,8 @@ function buildActivityRoute({ trackingEntries, screenshots = [], rangeStart, ran
   });
 
   if (cursor < rangeEnd.getTime()) {
-    const heartbeatEnd = getScreenshotHeartbeatEnd(
-      screenshots,
-      cursor,
-      rangeEnd.getTime(),
-    );
-    append('Work', cursor, heartbeatEnd);
-    append('Offline', heartbeatEnd, rangeEnd.getTime());
+    // Presence heartbeats do not establish active work duration.
+    append('Offline', cursor, rangeEnd.getTime());
   }
 
   const displayRoute = route.reduce((merged, part) => {
@@ -406,9 +386,24 @@ function buildActivityRoute({ trackingEntries, screenshots = [], rangeStart, ran
       return merged;
     }, []);
 
-  return displayRoute.map((part, index) => ({
+  let correctedRoute = displayRoute;
+  manualEntries.forEach((entry) => {
+    const start = Math.max(rangeStart.getTime(), new Date(entry.timestamp).getTime());
+    const end = Math.min(rangeEnd.getTime(), new Date(entry.timestamp).getTime() + entry.duration);
+    if (end <= start) return;
+    correctedRoute = correctedRoute.flatMap((part) => {
+      if (part.end <= start || part.start >= end) return [part];
+      return [
+        ...(part.start < start ? [{ ...part, end: start }] : []),
+        { label: entry.manualTimeType === 'offline' ? 'Offline' : entry.manualTimeType === 'inactive' ? 'Inactive' : 'Work', manual: true, start: Math.max(start, part.start), end: Math.min(end, part.end) },
+        ...(part.end > end ? [{ ...part, start: end }] : []),
+      ];
+    });
+  });
+  return correctedRoute.map((part, index) => ({
     id: `activity-${index + 1}`,
     label: part.label,
+    manual: Boolean(part.manual),
     startedAt: new Date(part.start).toISOString(),
     endedAt: new Date(part.end).toISOString(),
   }));
@@ -590,7 +585,7 @@ router.get('/user/:identifier/presence-sessions', requireDashboardAuthenticatedA
       .select('_id email')
       .lean();
 
-    const [trackingEntries, screenshots, attendance] = await Promise.all([
+    const [trackingEntries, screenshots, attendance, originalEntries] = await Promise.all([
       aggregateTrackingEntries([
         { $match: { ...userQuery, timestamp: { $gte: start, $lt: end } } },
         { $project: {
@@ -617,16 +612,11 @@ router.get('/user/:identifier/presence-sessions', requireDashboardAuthenticatedA
           dateKey: date,
         }).lean()
         : null,
+      aggregateTrackingEntries([
+        { $match: { ...userQuery, timestamp: { $gte: start, $lt: end } } },
+        { $sort: { timestamp: 1 } },
+      ], { manualOverrides: false }),
     ]);
-
-    const now = new Date();
-    const presenceStart = attendance?.checkInAt
-      ? new Date(Math.max(start.getTime(), new Date(attendance.checkInAt).getTime()))
-      : start;
-    const openAttendanceEnd = date === getDayKey(now) ? now : end;
-    const presenceEnd = attendance?.checkOutAt
-      ? new Date(Math.min(end.getTime(), new Date(attendance.checkOutAt).getTime()))
-      : new Date(Math.min(end.getTime(), openAttendanceEnd.getTime()));
 
     res.json({
       success: true,
@@ -637,16 +627,16 @@ router.get('/user/:identifier/presence-sessions', requireDashboardAuthenticatedA
           ? buildPresenceSessions({
             trackingEntries,
             screenshots,
-            rangeStart: presenceStart,
-            rangeEnd: presenceEnd,
+            rangeStart: start,
+            rangeEnd: end,
           })
           : [],
-        activityRoute: attendance || trackingEntries.length || screenshots.length
+        activityRoute: attendance || originalEntries.length || screenshots.length
           ? buildActivityRoute({
-            trackingEntries,
+            trackingEntries: originalEntries,
             screenshots,
-            rangeStart: presenceStart,
-            rangeEnd: presenceEnd,
+            rangeStart: start,
+            rangeEnd: end,
           })
           : [],
         attendance: attendance ? {
@@ -662,7 +652,7 @@ router.get('/user/:identifier/presence-sessions', requireDashboardAuthenticatedA
   }
 });
 
-router.post('/manual', requireDashboardAuthenticatedAdmin, async (req, res) => {
+async function saveManualTime(req, res) {
   try {
     const {
       userId,
@@ -673,12 +663,19 @@ router.post('/manual', requireDashboardAuthenticatedAdmin, async (req, res) => {
       project,
       task,
       taskName,
+      timeType = req.manualTimeType || 'active',
     } = req.body || {};
 
     const normalizedUserEmail = normalizeIdentifier(userEmail);
-    const normalizedTaskName = String(taskName || '').trim();
+    const normalizedTaskName = String(taskName || '').trim() || (timeType === 'inactive' ? 'Manual inactive time' : timeType === 'offline' ? 'Manual offline time' : '');
     const normalizedProject = String(project || '').trim() || 'Default';
     const normalizedTask = String(task || '').trim() || 'Add New';
+    if (!['active', 'inactive', 'offline'].includes(timeType)) {
+      return res.status(400).json({ success: false, message: 'Time type must be active, inactive, or offline.' });
+    }
+    if (req.manualTimeType && req.manualTimeType !== timeType) {
+      return res.status(400).json({ success: false, message: 'Time type does not match the selected endpoint.' });
+    }
 
     if ((!userId || !String(userId).trim()) && !normalizedUserEmail) {
       return res.status(400).json({ success: false, message: 'A valid user is required.' });
@@ -688,19 +685,22 @@ router.post('/manual', requireDashboardAuthenticatedAdmin, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Date, time range, and task name are required.' });
     }
 
-    const startedAt = new Date(`${date}T${fromTime}:00`);
-    const endedAt = new Date(`${date}T${toTime}:00`);
-
-    if (Number.isNaN(startedAt.getTime()) || Number.isNaN(endedAt.getTime()) || endedAt <= startedAt) {
-      return res.status(400).json({ success: false, message: 'Please provide a valid manual time range.' });
+    let startedAt, endedAt;
+    try {
+      ({ startedAt, endedAt } = parseManualRange(date, fromTime, toTime));
+    } catch (error) {
+      return res.status(400).json({ success: false, message: error.message });
+    }
+    if (userId && !mongoose.isValidObjectId(userId)) {
+      return res.status(400).json({ success: false, message: 'Invalid user ID.' });
     }
 
     const duration = endedAt.getTime() - startedAt.getTime();
-    const user = await User.findOne(buildUserLookupQuery({
-      userId,
-      userEmail: normalizedUserEmail,
+    const user = await User.findOne({
       adminId: req.adminId,
-    })).lean();
+      ...(userId ? { _id: userId } : {}),
+      ...(normalizedUserEmail ? { email: normalizedUserEmail } : {}),
+    }).lean();
 
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found for manual time entry.' });
@@ -714,22 +714,22 @@ router.post('/manual', requireDashboardAuthenticatedAdmin, async (req, res) => {
       title: `${normalizedTask}: ${normalizedTaskName}`,
       url: null,
       duration,
-      activeDuration: duration,
-      inactiveDuration: 0,
+      activeDuration: timeType === 'active' ? duration : 0,
+      inactiveDuration: timeType === 'inactive' ? duration : 0,
       keystrokes: 0,
       mouseClicks: 0,
       mouseMovements: 0,
       activityEvents: 0,
       activityFrequency: 0,
-      productivityScore: 100,
-      classification: 'active',
+      productivityScore: timeType === 'active' ? 100 : 0,
+      classification: timeType === 'active' ? 'active' : 'idle',
       sessionId: 'manual-entry',
+      manualTimeType: timeType,
       userEmail: user.email,
       timestamp: startedAt,
     });
 
     clearSummaryCache();
-    await User.findByIdAndUpdate(user._id, { lastSeenAt: new Date() });
 
     res.status(201).json({
       success: true,
@@ -739,6 +739,8 @@ router.post('/manual', requireDashboardAuthenticatedAdmin, async (req, res) => {
         userEmail: manualEntry.userEmail,
         duration: manualEntry.duration,
         activeDuration: manualEntry.activeDuration,
+        inactiveDuration: manualEntry.inactiveDuration,
+        timeType,
         date,
         fromTime,
         toTime,
@@ -751,7 +753,15 @@ router.post('/manual', requireDashboardAuthenticatedAdmin, async (req, res) => {
     console.error('[Backend] Manual tracking save error:', error);
     res.status(500).json({ success: false, message: 'Unable to save manual time' });
   }
-});
+}
+
+router.post('/manual', requireDashboardAuthenticatedAdmin, saveManualTime);
+for (const type of ['active', 'inactive', 'offline']) {
+  router.post(`/manual/${type}`, requireDashboardAuthenticatedAdmin, (req, res, next) => {
+    req.manualTimeType = type;
+    next();
+  }, saveManualTime);
+}
 
 router.get('/user/:identifier/summary', requireDashboardAuthenticatedAdmin, async (req, res) => {
   try {

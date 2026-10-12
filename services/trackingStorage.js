@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const TrackingEntry = require('../models/TrackingEntry');
 const TrackingBucket = require('../models/TrackingBucket');
+const { manualTimeOverlayStages } = require('./manualTimeOverlay');
 
 const MINUTE_MS = 60 * 1000;
 
@@ -152,19 +153,29 @@ function bucketReadStages(firstMatch) {
 
 // Present old standalone entries and new bucketed samples as one unchanged
 // logical TrackingEntry stream to every dashboard/report query.
-function aggregateTrackingEntries(pipeline) {
+function aggregateTrackingEntries(pipeline, { manualOverrides = true } = {}) {
   const firstMatch = pipeline[0]?.$match;
+  const scope = firstMatch ? { ...firstMatch } : null;
+  // A correction can split a sample whose original timestamp was outside the
+  // requested range. Filter actual intervals before the lookup, then apply the
+  // caller's exact timestamp filter to the resulting pieces.
+  if (scope && manualOverrides) delete scope.timestamp;
   const unionStage = {
     $unionWith: {
       coll: TrackingBucket.collection.name,
       pipeline: [
-        ...bucketReadStages(firstMatch),
-        ...(firstMatch ? [{ $match: firstMatch }] : []),
+        ...bucketReadStages(scope),
+        ...(scope ? [{ $match: scope }] : []),
       ],
     },
   };
   return TrackingEntry.aggregate([
-    ...(firstMatch ? [pipeline[0], unionStage, ...pipeline.slice(1)] : [unionStage, ...pipeline]),
+    ...(scope ? [{ $match: scope }] : []),
+    unionStage,
+    ...(manualOverrides ? manualTimeOverlayStages(TrackingEntry.collection.name, firstMatch?.timestamp) : []),
+    // Offline corrections mask earlier samples but are not tracked duration.
+    ...(manualOverrides ? [{ $match: { manualTimeType: { $ne: 'offline' } } }] : []),
+    ...pipeline,
   ]);
 }
 
