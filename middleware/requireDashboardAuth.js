@@ -1,8 +1,8 @@
 const jwt = require('jsonwebtoken');
 const Admin = require('../models/Admin');
+const AdminSession = require('../models/AdminSession');
 const { extractToken } = require('../utils/auth');
-const { DASHBOARD_ADMIN_USERNAME, JWT_SECRET } = require('../config/constants');
-const { ensureDefaultAdmin } = require('../services/adminBootstrap');
+const { JWT_SECRET } = require('../config/constants');
 
 async function requireDashboardAuthenticatedAdmin(req, res, next) {
   const token = extractToken(req);
@@ -13,19 +13,7 @@ async function requireDashboardAuthenticatedAdmin(req, res, next) {
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    const isLegacyDashboardAdminToken = decoded?.scope === 'dashboard-admin'
-      && decoded?.username === DASHBOARD_ADMIN_USERNAME
-      && !decoded?.adminId;
-
-    if (isLegacyDashboardAdminToken) {
-      const admin = await ensureDefaultAdmin();
-      req.dashboardAuth = decoded;
-      req.admin = admin;
-      req.adminId = admin._id;
-      next();
-      return;
-    }
+    const decoded = jwt.verify(token, JWT_SECRET, { maxAge: '6h' });
 
     const isDashboardAdminToken = decoded?.scope === 'dashboard-admin' && decoded?.adminId;
 
@@ -38,7 +26,19 @@ async function requireDashboardAuthenticatedAdmin(req, res, next) {
     const tokenSessionId = String(decoded?.sessionId || '').trim();
     const activeSessionId = String(admin?.activeSessionId || '').trim();
 
-    if (!admin || !tokenSessionId || !activeSessionId || tokenSessionId !== activeSessionId) {
+    if (!admin || !tokenSessionId || !Number.isFinite(decoded.exp)) {
+      res.status(401).json({ success: false, message: 'Invalid dashboard session' });
+      return;
+    }
+
+    const session = await AdminSession.exists({
+      adminId: admin._id, sessionId: tokenSessionId, expiresAt: { $gt: new Date() },
+    });
+    // Existing sessions remain usable until their original expiry. New logins
+    // never overwrite this legacy field, and v2 tokens cannot use the fallback.
+    const validLegacySession = decoded.sessionVersion === undefined
+      && activeSessionId && tokenSessionId === activeSessionId;
+    if (!session && !validLegacySession) {
       res.status(401).json({ success: false, message: 'Invalid dashboard session' });
       return;
     }

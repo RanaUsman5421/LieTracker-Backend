@@ -4,6 +4,7 @@
   "private": true,
   "main": "server.js",
   "scripts": {
+    "test:admin-sessions": "node tests/adminSessions.test.js",
     "test:manual-time": "node tests/manualTime.test.js",
     "start": "node server.js",
     "dev": "nodemon server.js",

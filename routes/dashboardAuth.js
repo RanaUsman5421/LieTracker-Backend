@@ -1,15 +1,14 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
 const { OAuth2Client } = require('google-auth-library');
 const Admin = require('../models/Admin');
+const AdminSession = require('../models/AdminSession');
+const { createAdminSession } = require('../services/adminSessions');
 const { createRateLimiter } = require('../middleware/rateLimit');
 const { requireDashboardAuthenticatedAdmin } = require('../middleware/requireDashboardAuth');
 const {
-  DASHBOARD_AUTH_TOKEN_TTL,
   GOOGLE_CLIENT_ID,
   GOOGLE_CLIENT_SECRET,
-  JWT_SECRET,
 } = require('../config/constants');
 
 const router = express.Router();
@@ -19,20 +18,6 @@ const dashboardAuthRateLimit = createRateLimiter({
   maxRequests: 20,
   message: 'Too many dashboard login attempts. Please try again later.',
 });
-
-function createDashboardAuthToken(admin, sessionId) {
-  return jwt.sign(
-    {
-      scope: 'dashboard-admin',
-      adminId: admin._id,
-      username: admin.username,
-      email: admin.email,
-      sessionId,
-    },
-    JWT_SECRET,
-    { expiresIn: DASHBOARD_AUTH_TOKEN_TTL }
-  );
-}
 
 function getTokenExpirationIso(token) {
   const decoded = jwt.decode(token);
@@ -104,11 +89,9 @@ router.post('/register', dashboardAuthRateLimit, async (req, res) => {
     }
 
     const admin = new Admin({ name, username, email, password });
-    const sessionId = crypto.randomUUID();
-    admin.activeSessionId = sessionId;
     await admin.save();
 
-    const token = createDashboardAuthToken(admin, sessionId);
+    const token = await createAdminSession(admin);
     res.status(201).json({
       success: true,
       token,
@@ -149,11 +132,7 @@ router.post('/login', dashboardAuthRateLimit, async (req, res) => {
       return;
     }
 
-    const sessionId = crypto.randomUUID();
-    admin.activeSessionId = sessionId;
-    await admin.save();
-
-    const token = createDashboardAuthToken(admin, sessionId);
+    const token = await createAdminSession(admin);
     res.json({
       success: true,
       token,
@@ -241,11 +220,9 @@ router.post('/google', dashboardAuthRateLimit, async (req, res) => {
       admin.googleId = googleId;
     }
 
-    const sessionId = crypto.randomUUID();
-    admin.activeSessionId = sessionId;
     await admin.save();
 
-    const token = createDashboardAuthToken(admin, sessionId);
+    const token = await createAdminSession(admin);
     res.json({
       success: true,
       token,
@@ -269,7 +246,12 @@ router.get('/verify', requireDashboardAuthenticatedAdmin, (req, res) => {
 
 router.post('/logout', requireDashboardAuthenticatedAdmin, async (req, res) => {
   try {
-    await Admin.findByIdAndUpdate(req.adminId, { activeSessionId: null });
+    const sessionId = req.dashboardAuth.sessionId;
+    // Clear only the matching pre-upgrade session, never another device's session.
+    if (req.dashboardAuth.sessionVersion !== 2) {
+      await Admin.updateOne({ _id: req.adminId, activeSessionId: sessionId }, { $set: { activeSessionId: null } });
+    }
+    await AdminSession.deleteOne({ adminId: req.adminId, sessionId });
     res.json({ success: true, message: 'Logged out successfully' });
   } catch (error) {
     console.error('[Backend] Dashboard logout error:', error);
