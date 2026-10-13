@@ -1,7 +1,8 @@
 {
-  "version": "0.3.3",
-  "notes": "Updated production backend and updater endpoints.",
-  "pub_date": "2026-09-23T17:26:48Z",
-  "installer": "LieTracker_0.3.3_x64-setup.exe",
-  "signatureFile": "LieTracker_0.3.3_x64-setup.exe.sig"
+    "version":  "0.3.4",
+    "notes":  "Offline-safe local logout and independent session cleanup. Production API and signed updater support.",
+    "pub_date":  "2026-10-13T00:27:36Z",
+    "installer":  "LieTracker_0.3.4_x64-setup.exe",
+    "signatureFile":  "LieTracker_0.3.4_x64-setup.exe.sig",
+    "publicBaseUrl":  "https://lietrackapi.intellioera.com/updates"
 }

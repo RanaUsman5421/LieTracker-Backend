@@ -49,7 +49,8 @@ function isSafeFileName(fileName, pattern) {
     && !path.isAbsolute(value);
 }
 
-function buildPublicFileUrl(req, fileName) {
+function buildPublicFileUrl(req, fileName, publicBaseUrl) {
+  if (publicBaseUrl) return `${publicBaseUrl}/${encodeURIComponent(fileName)}`;
   const forwardedProtocol = String(req.get('x-forwarded-proto') || '').split(',')[0].trim();
   const protocol = forwardedProtocol || req.protocol;
   const baseUrl = `${protocol}://${req.get('host')}${req.baseUrl}`;
@@ -93,6 +94,13 @@ function validateUpdaterConfig(config) {
   const pubDate = String(config?.pub_date || '').trim();
   const installer = String(config?.installer || '').trim();
   const signatureFile = String(config?.signatureFile || '').trim();
+  const publicBaseUrl = String(config?.publicBaseUrl || '').trim().replace(/\/+$/, '');
+  if (publicBaseUrl) {
+    const parsed = new URL(publicBaseUrl);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new Error('Updater publicBaseUrl must be an HTTPS URL without credentials or query parameters');
+    }
+  }
 
   if (!parseVersion(version)) {
     throw new Error('Updater configuration has an invalid version');
@@ -116,6 +124,7 @@ function validateUpdaterConfig(config) {
     pubDate,
     installer,
     signatureFile,
+    publicBaseUrl,
   };
 }
 
@@ -182,7 +191,7 @@ router.get('/:target/:arch/:currentVersion', async (req, res) => {
       version: config.version,
       notes: config.notes,
       pub_date: config.pubDate,
-      url: buildPublicFileUrl(req, config.installer),
+      url: buildPublicFileUrl(req, config.installer, config.publicBaseUrl),
       signature,
     });
   } catch (error) {
