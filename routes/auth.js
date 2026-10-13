@@ -128,7 +128,11 @@ router.get('/verify', async (req, res) => {
 
 router.post('/logout', requireAuthenticatedUser, async (req, res) => {
   try {
-    await User.findByIdAndUpdate(req.authUser._id, { activeSessionId: null });
+    // A delayed desktop logout must not clear a subsequent login session.
+    await User.updateOne(
+      { _id: req.authUser._id, activeSessionId: req.authUser.activeSessionId },
+      { $set: { activeSessionId: null } }
+    );
     res.json({ success: true, message: 'Logged out successfully' });
   } catch (error) {
     console.error('[Backend] Logout error:', error);
